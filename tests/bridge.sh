@@ -43,6 +43,11 @@ same "$(git ls-files -s run.sh link | awk '{print $1}' | tr '\n' ' ')" "120000 1
 echo b3 > b.txt && rm src/a.txt && echo new > new.txt
 same "$(git_changes)" "$(copse_changes)" "uncommitted changes show the same in git status (so editors mark them)"
 same "$(git diff --stat | tail -1 | sed 's/^ *//')" "2 files changed, 1 insertion(+), 2 deletions(-)" "git diff shows them"
+# An edit that keeps the file's size, with the view rewritten in a later second: git
+# must still notice it (it once trusted a stat copse had paired with old content).
+echo x3 > b.txt && perl -e 'select(undef,undef,undef,1.2)' && cps status >/dev/null
+git diff --stat | has "b.txt" && ok "a same-size edit is still seen by git after the view is rewritten" || fail "line $LINENO: git didn't notice the edit to b.txt"
+echo b3 > b.txt
 cps commit -m three >/dev/null
 same "$(git log -n 1 --format=%s) $(git status --porcelain | wc -l | tr -d ' ')" "three 0" "a copse commit appears in git at once"
 same "$(git blame --porcelain b.txt | awk 'NR==1 {print substr($1,1,7)}')" "$(git rev-parse --short=7 HEAD)" "git blame works"

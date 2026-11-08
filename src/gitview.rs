@@ -198,9 +198,19 @@ fn write_index(repo: &Repo, git: &Path, map: &GitMap) -> Result<()> {
             },
         };
         let md = fs::symlink_metadata(repo.root.join(path)).ok();
+        // The file's real stat goes in only if copse's own index vouches that the
+        // file still holds this entry's content (same size, mtime and mode as when
+        // copse recorded it). Otherwise git would see a stat matching the file on
+        // disk next to the old content's id, trust it, and miss the edit. A blank
+        // stat makes git look at the content instead (git does the same for files
+        // it can't vouch for).
+        let unchanged = md.as_ref().is_some_and(|m| {
+            let (size, mtime, mode) = crate::worktree::stat_of(m);
+            size == e.size && mtime == e.mtime_ns && mode == e.mode
+        });
         let (ctime, ctime_ns, mtime, mtime_ns, dev, ino, uid, gid, size) = match &md {
-            Some(m) => (m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec(), m.dev(), m.ino(), m.uid(), m.gid(), m.size()),
-            None => (0, 0, 0, 0, 0, 0, 0, 0, 0),
+            Some(m) if unchanged => (m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec(), m.dev(), m.ino(), m.uid(), m.gid(), m.size()),
+            _ => (0, 0, 0, 0, 0, 0, 0, 0, 0),
         };
         let mode: u32 = match e.mode {
             Mode::File => 0o100644,
