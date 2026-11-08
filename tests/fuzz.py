@@ -13,10 +13,9 @@ other rounds rebases or cherry-picks) in both, and compares:
     line-merge algorithms aren't identical, so a few are expected, but each is
     printed so it can be looked at.
 
-Known, deliberate difference: git's directory rename detection (a new file added
-in a folder the other side moved wholesale goes to the new folder, flagged as a
-"file location" conflict). copse leaves the file where it was made. Those rounds
-are counted as "git moved a file into a renamed folder", not as mismatches.
+Folder moves (git's directory rename detection) are followed as git follows them.
+Rounds where git reports a folder move are still counted on their own line, so a
+regression there is easy to spot.
 
 Usage: tests/fuzz.py [rounds] [seed] [work_dir]
 Exits 1 if any round produced different files where both tools succeeded.
@@ -178,6 +177,8 @@ def compare(kind, rnd, g_ok, c_ok, g, c, stats, detail, git_out=""):
             stats["both_conflict"] += 1
         elif "CONFLICT (file location)" in git_out:
             stats["dir_rename"] += 1
+            print(f"  folder move ({kind}, round {rnd}): git {sorted(gc)} copse {sorted(cc)}; other files differ: "
+                  f"{sorted(p for p in set(clean_g) | set(clean_c) if clean_g.get(p) != clean_c.get(p))}\n    {detail}")
         else:
             stats["conflict_mismatch"] += 1
             print(f"  conflicts differ ({kind}, round {rnd}): git {sorted(gc)} copse {sorted(cc)}; "

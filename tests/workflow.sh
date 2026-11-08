@@ -62,6 +62,17 @@ cps checkout r2 >/dev/null && sed 's/^128$/one-two-eight/' other.txt > b.txt && 
 cps merge r1 | has "renamed differently on each side" && same "$(grep -c -E '^(one-oh-two|one-two-eight)$' a.txt) $(grep -c -E '^(one-oh-two|one-two-eight)$' b.txt)" "2 2" "renamed differently on each side: both names get both sides' changes (as git does)" || fail "line $LINENO: a step before this check failed"
 cps merge --abort >/dev/null; cd ..
 
+echo "== merges follow folder moves"
+mkdir dm && cd dm && cps init >/dev/null && mkdir lib && echo a > lib/a.txt && echo b > lib/b.txt && echo top > top.txt && cps commit -m base >/dev/null
+cps branch move >/dev/null && cps checkout move >/dev/null && mkdir src && mv lib/a.txt lib/b.txt src/ && rmdir lib && cps commit -m "lib/ becomes src/" >/dev/null
+cps checkout main >/dev/null && echo new > lib/new.txt && cps commit -m "a new file in lib/" >/dev/null
+out=$(cps merge move); [[ "$out" == *"added in a folder the other side moved"* ]] && [[ -f src/new.txt && ! -e lib ]] && ok "a file added in a folder the other side moved goes to the folder's new place, and it's reported" || fail "$out"
+echo "checked" >/dev/null && cps commit -m "merged" >/dev/null && same "$(cps show --stat HEAD | grep -c 'src/')" "3" "and the merge can be committed as it stands (all three files now in src/)" || fail "line $LINENO: a step before this check failed"
+cps branch flatten HEAD~1 >/dev/null && cps checkout flatten >/dev/null && mv lib/a.txt lib/b.txt . && rm lib/new.txt && rmdir lib && cps commit -m "lib/ moved to the top" >/dev/null
+cps checkout main >/dev/null 2>&1; cps reset --hard HEAD~1 >/dev/null 2>&1; echo more > lib/more.txt && cps commit -m "another lib file" >/dev/null
+cps merge flatten >/dev/null; [[ -f more.txt && ! -e lib/more.txt ]] && ok "a folder moved to the top level: its new file follows it there" || fail "line $LINENO: more.txt didn't follow lib/ to the top"
+cps merge --abort >/dev/null 2>&1 || true; cd ..
+
 echo "== fast-forward pulls touch only what changed"
 mkdir ff && cd ff && cps init >/dev/null && mkdir -p src docs && echo a > src/a.txt && echo b > src/b.txt && echo d > docs/d.txt && echo k > keep.txt && cps commit -m base >/dev/null
 cd .. && cps clone ff ff2 >/dev/null && cd ff

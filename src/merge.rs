@@ -412,6 +412,10 @@ fn follow_renames(repo: &Repo, base: &Files, ours: &Files, theirs: &Files) -> (F
             moves.push((r.from.clone(), r.to.clone(), false));
         }
     }
+    // Folders a side moved wholesale (computed before any of the moves below).
+    let ours_dirs = crate::renames::dir_renames(&ours, &ours_renames);
+    let theirs_dirs = crate::renames::dir_renames(&theirs, &theirs_renames);
+    let original_base = base.clone();
     for (from, to, by_theirs) in moves {
         let other = if by_theirs { &mut ours } else { &mut theirs };
         // Only if the other side still has the old file and nothing at the new name.
@@ -428,6 +432,40 @@ fn follow_renames(repo: &Repo, base: &Files, ours: &Files, theirs: &Files) -> (F
         }
         if let Some(v) = base.remove(&from) {
             base.insert(to, v);
+        }
+    }
+    // A file the other side added in a folder this side moved goes to the folder's
+    // new place, reported as a conflict so you can check it (git's default).
+    for (dirs, by_theirs) in [(&theirs_dirs, true), (&ours_dirs, false)] {
+        if dirs.is_empty() {
+            continue;
+        }
+        let other = if by_theirs { &ours } else { &theirs };
+        let added: Vec<String> = other.keys().filter(|p| !original_base.contains_key(*p)).cloned().collect();
+        for path in added {
+            // The most specific moved folder holding it.
+            let Some((old, new)) = dirs.iter().filter(|(old, _)| path.starts_with(&format!("{old}/"))).max_by_key(|(old, _)| old.len()) else { continue };
+            // (A folder moved to the top level: its files go there, without the folder.)
+            let moved = if new.is_empty() { path[old.len() + 1..].to_string() } else { format!("{new}{}", &path[old.len()..]) };
+            if base.contains_key(&moved) || ours.contains_key(&moved) || theirs.contains_key(&moved) {
+                continue;
+            }
+            // Move it in every version that has it there: the base and the other side
+            // may hold it too, if it arrived at this path by a file rename above.
+            for tree in [&mut base, &mut ours, &mut theirs] {
+                if let Some(v) = tree.remove(&path) {
+                    tree.insert(moved.clone(), v);
+                }
+            }
+            // A file renamed differently on each side may be one of these: follow it.
+            for d in doubles.iter_mut() {
+                for name in [&mut d.1, &mut d.2] {
+                    if *name == path {
+                        *name = moved.clone();
+                    }
+                }
+            }
+            conflicts.push((moved, "added in a folder the other side moved; put it in the folder's new place"));
         }
     }
     (base, ours, theirs, conflicts, doubles)

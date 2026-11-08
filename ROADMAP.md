@@ -55,7 +55,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | `checkout` / `switch` | ✅ | Branches, ids, `HEAD~N`, `origin/main` |
 | `restore` (files or folders, from any commit) | ✅ | Saves uncommitted edits as a stash before overwriting them |
 | `reset` (default and `--hard`) | ✅ | Default keeps your files (git's `--soft`/`--mixed` are the same without a staging area); `--hard` backs up uncommitted work first; `undo` reverses either |
-| `merge` | ✅ | `--no-ff`, `--ff-only`, `-m`; follows renames (also in rebase, cherry-pick, revert, stash); fast-forwards touch only changed files. No directory rename detection or merge strategies |
+| `merge` | ✅ | `--no-ff`, `--ff-only`, `-m`; follows renames and folder moves, as git does (also in rebase, cherry-pick, revert, stash); fast-forwards touch only changed files. No merge strategies |
 | `rebase`, `rebase -i` | ✅ | All six actions plus `exec`, `--onto`, `--autosquash`, `-x` |
 | `cherry-pick`, `revert` | ✅ | Single commits and ranges, conflicts with continue/skip/abort, merges with `-m N` |
 | `stash` | ✅ | Including only some files (`copse stash -- paths`) |
@@ -112,11 +112,11 @@ Work through the remaining gaps in batches, testing each against real git wherev
    - 7c: ✅ LFS, ✅ a `.git` view for editors; Windows still to do (needs a Windows toolchain to check the build)
 
 8. ✅ **Security:** file and folder names checked as git checks them (no `..`, no `.copse`/`.git` in any disguise, no repeated names), never writing through a symlink, no option injection through ssh hosts or submodule URLs; `tests/security.sh` attacks with hand-crafted repositories
-9. ✅ **Hardening:** rename detection in merges; randomized stress tests against git (`tests/fuzz.py`: 1,750 rounds, no differences beyond git's directory-rename guesses); signed commits checked on github.com; fast-forward pulls that touch only changed files (now faster than git); signed tags; signing that follows git's settings
+9. ✅ **Hardening:** rename detection in merges; randomized stress tests against git (`tests/fuzz.py`: 2,000 rounds across eight seeds match git exactly, folder moves included); signed commits checked on github.com; fast-forward pulls that touch only changed files (now faster than git); signed tags; signing that follows git's settings
 
 **Self-hosting (2026-11-07):** copse now versions its own source with copse, pushed to the private repository Copse-SCM/copse on GitHub. A fresh git clone of it builds from scratch and passes the tests.
 
-Before relying on copse for real work: weeks of use on a backed-up project (this one, now). Still open: Windows, directory rename detection, pushing to github.com over SSH, LFS against GitHub's server.
+Before relying on copse for real work: weeks of use on a backed-up project (this one, now). Still open: Windows, pushing to github.com over SSH, LFS against GitHub's server.
 
 ## 4. After parity: a built-in TUI ✅
 

@@ -161,6 +161,53 @@ pub fn detect(repo: &Repo, old: &Files, new: &Files) -> Vec<Rename> {
     out
 }
 
+/// The folders a rename moved a file between, ignoring the part of the path that
+/// stayed the same: src/foo/bar.c -> lib/foo/bar.c is a move from src to lib (git's
+/// rule). The new folder may be "" (the top level). None when the file came from
+/// the top level, or stayed in its folder.
+fn renamed_dirs(from: &str, to: &str) -> Option<(String, String)> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (from.split('/').collect(), to.split('/').collect());
+    let (mut i, mut j) = (a.len(), b.len());
+    while i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+        i -= 1;
+        j -= 1;
+    }
+    if i == a.len() {
+        // Different file names: the folders are the ones holding the files.
+        i -= 1;
+        j -= 1;
+    }
+    let (old, new) = (a[..i].join("/"), b[..j].join("/"));
+    (!old.is_empty() && old != new).then_some((old, new))
+}
+
+/// Folders a side renamed, as git works it out: every file rename votes for where
+/// its folder went, and a folder counts as renamed only if that side has nothing
+/// left in it and one destination wins outright.
+pub fn dir_renames(side: &Files, renames: &[Rename]) -> Vec<(String, String)> {
+    let mut votes: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for r in renames {
+        if let Some((old, new)) = renamed_dirs(&r.from, &r.to) {
+            *votes.entry(old).or_default().entry(new).or_default() += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (old, targets) in votes {
+        let prefix = format!("{old}/");
+        if side.keys().any(|p| p.starts_with(&prefix)) {
+            continue; // the folder is still there on this side: not renamed
+        }
+        let best = targets.values().copied().max().unwrap_or(0);
+        let winners: Vec<&String> = targets.iter().filter(|(_, n)| **n == best).map(|(d, _)| d).collect();
+        // A tie is ambiguous: no folder move. The winner may be "" (the top level).
+        if let [new] = winners.as_slice() {
+            out.push((old, (*new).clone()));
+        }
+    }
+    out.sort();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +222,14 @@ mod tests {
         let d = profile(b"nothing\nin\ncommon\nhere\n").unwrap();
         assert_eq!(similarity(&a, &d), 0);
         assert!(profile(b"bin\0ary").is_none());
+    }
+
+    #[test]
+    fn folder_moves_from_file_renames() {
+        assert_eq!(renamed_dirs("src/foo/bar.c", "lib/foo/bar.c"), Some(("src".into(), "lib".into())));
+        assert_eq!(renamed_dirs("a/b/x.txt", "a/c/y.txt"), Some(("a/b".into(), "a/c".into())));
+        assert_eq!(renamed_dirs("x.txt", "lib/x.txt"), None);
+        assert_eq!(renamed_dirs("src/x.txt", "x.txt"), Some(("src".into(), "".into())));
+        assert_eq!(renamed_dirs("lib/x.txt", "lib/y.txt"), None);
     }
 }
