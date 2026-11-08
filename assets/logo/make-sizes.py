@@ -12,6 +12,9 @@ tighter crop as it shrinks.
 
 Each also has a -dark version (a lighter green for dark backgrounds), and
 favicon.svg switches between the two with the system's light or dark setting.
+avatar.svg is the organization avatar: the master's light weights on white,
+cropped tightly so the leaf fills the square. avatar-512.png is rendered from it
+(on macOS: qlmanage -t -s 512 -o . avatar.svg).
 
 Usage: python3 assets/logo/make-sizes.py [output folder]   (default: this folder)
 """
@@ -67,4 +70,12 @@ for name in SIZES:
     open(f"{OUT}/copse-leaf-{name}-dark.svg", "w").write(svg(name, GREEN_DARK))
 # The favicon: the small version, switching colour with the system's dark mode.
 open(f"{OUT}/favicon.svg", "w").write(svg("tiny", GREEN, GREEN_DARK))
+# The avatar: master weights, cropped tightly (the artwork spans x 208..1110 and
+# y 123..1153, the stem tip), with a small margin, on white.
+cx, cy, side = (208 + 1110) / 2, (123 + 1153) / 2, (1153 - 123) * 1.10
+ax, ay = cx - side / 2, cy - side / 2
+inner = svg("master", GREEN).split(">", 1)[1].rsplit("</svg>", 1)[0]
+open(f"{OUT}/avatar.svg", "w").write(
+    f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{ax:.0f} {ay:.0f} {side:.0f} {side:.0f}">'
+    f'<rect x="{ax:.0f}" y="{ay:.0f}" width="{side:.0f}" height="{side:.0f}" fill="#ffffff"/>{inner}</svg>\n')
 print("written")
