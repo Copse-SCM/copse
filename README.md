@@ -13,10 +13,21 @@ copse is versioned with itself and pushed with copse to [Copse-SCM/copse](https:
 
 ## Install
 
+Download the archive for your machine from the [latest release](https://github.com/Copse-SCM/copse/releases/latest) (macOS on Apple Silicon or Intel, Linux on x86_64), unpack it, and put `copse` on your `PATH`:
+
+```bash
+tar xzf copse-*.tar.gz && sudo mv copse-*/copse /usr/local/bin/
+copse version
+```
+
+`SHA256SUMS` in the release lets you check the download (`shasum -a 256 -c SHA256SUMS --ignore-missing`). Or build it yourself:
+
 ```bash
 cargo install --git https://github.com/Copse-SCM/copse     # or, from a checkout:
 cargo build --release                                      # binary at target/release/copse
 ```
+
+**Versions** are dates: `2026.11.0` is the first release of November 2026, `2026.11.1` the next. A [nightly build](https://github.com/Copse-SCM/copse/releases/tag/nightly) of main is published each day it changes, named like `2026.11.09-dev+abc1234` (the date and the commit).
 
 ## A quick tour
 
@@ -51,7 +62,7 @@ copse                         # the interactive screen
 
 ## Status
 
-Version 0.1, for people who like trying new tools. 1,019 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.
+The first release is 2026.11.0, for people who like trying new tools. 1,019 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.
 
 ## License
 

@@ -292,7 +292,7 @@ pub fn download(repo: &Repo, pointers: &[Pointer]) -> Result<usize> {
     let remote = default_remote(repo)?;
     let url = endpoint(repo, &remote)?;
     let mut http = Http::new(&url, "upload-pack");
-    let agent = ureq::AgentBuilder::new().user_agent(crate::githttp::USER_AGENT).build();
+    let agent = ureq::AgentBuilder::new().user_agent(&crate::githttp::user_agent()).build();
     let mut got = 0;
     for obj in batch(&mut http, &url, "download", &missing)? {
         let oid = obj["oid"].as_str().unwrap_or_default().to_string();
@@ -348,7 +348,7 @@ pub fn upload(repo: &Repo, remote: &str, pointers: &[Pointer]) -> Result<usize> 
     let url = endpoint(repo, remote)?;
     let mut http = Http::new(&url, "receive-pack");
     let objects = batch(&mut http, &url, "upload", pointers)?;
-    let agent = ureq::AgentBuilder::new().user_agent(crate::githttp::USER_AGENT).build();
+    let agent = ureq::AgentBuilder::new().user_agent(&crate::githttp::user_agent()).build();
     let mut sent = 0;
     for obj in objects {
         let oid = obj["oid"].as_str().unwrap_or_default().to_string();

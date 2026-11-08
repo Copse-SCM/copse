@@ -26,6 +26,7 @@ Everything copse does, command by command. For a quick start, see the [README](.
 - [Layout](#layout)
 - [Benchmark](#benchmark)
 - [Plumbing for scripts](#plumbing-for-scripts)
+- [Releases and nightly builds](#releases-and-nightly-builds)
 - [How it's tested](#how-its-tested)
 - [Not built yet](#not-built-yet)
 
@@ -54,7 +55,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 
 | Command | What it does |
 |---|---|
-| `copse version` (or `--version`) | Which version this is (release and nightly builds carry their full name, e.g. `0.1.0-dev.20261109+abc1234`) |
+| `copse version` (or `--version`) | Which version this is (release and nightly builds carry their full name, e.g. `2026.11.09-dev+abc1234` for a nightly) |
 | `copse init [dir]` | Create a repository in the current folder, or in `dir` |
 | `copse init --bare <dir>` | Create a shared copy with no working files, to push to and pull from |
 | `copse status` (`st`) | List added (A), modified (M) and deleted (D) files, and say where you stand against `origin` (in step, commits to push or pull, or diverged) |
@@ -533,6 +534,13 @@ Small commands with git's output formats, for scripts and tools. Ids are copse's
 | `copse hash-object [-w] [--stdin] FILE...` | The id a file would be stored under; `-w` stores it |
 
 Every command that takes a revision understands git's names: a branch, `origin/main`, a tag, an id prefix, `HEAD` or `@`, `main@{2}`, followed by `~N`, `^`, `^N`, `^{}` or `^{tree}`, and `REV:path` for a file or folder inside a commit.
+
+## Releases and nightly builds
+
+- **Versions are dates:** `YEAR.MONTH.N`, so `2026.11.0` is November 2026's first release and `2026.11.1` the next. The version is in `Cargo.toml`.
+- **A release** is made by pushing a tag `v2026.11.0` (it must match `Cargo.toml`). `.github/workflows/release.yml` builds copse for macOS (Apple Silicon and Intel) and Linux x86_64, checks each build reports the right version, and publishes a GitHub release with the archives (copse, LICENSE, NOTICE, README) and `SHA256SUMS`.
+- **Nightly builds** (`.github/workflows/nightly.yml`) run every morning at 06:17 UTC, if main changed since the last one, and replace the `nightly` pre-release. They're named `2026.11.09-dev+abc1234`: the date and the commit. Running the workflow by hand from the Actions tab makes one straight away.
+- Both share `.github/workflows/build.yml`. A build's version comes from `COPSE_BUILD` at compile time; without it, `copse version` shows `Cargo.toml`'s.
 
 ## How it's tested
 

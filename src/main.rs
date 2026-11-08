@@ -46,7 +46,7 @@ use std::path::PathBuf;
 /// There is no staging area: `copse commit` snapshots every file that isn't
 /// ignored by .gitignore or .copseignore.
 /// The version: Cargo's, or the full name a release or nightly build was given
-/// (COPSE_BUILD at compile time, e.g. "0.1.0-dev.20261109+abc1234").
+/// (COPSE_BUILD at compile time, e.g. "2026.11.09-dev+abc1234" for a nightly).
 pub const VERSION: &str = match option_env!("COPSE_BUILD") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),

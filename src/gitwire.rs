@@ -737,7 +737,8 @@ pub fn push(repo: &Repo, remote: &str, url: &str, updates: &[RefUpdate], force: 
     if caps.contains("report-status") {
         wanted.push("report-status");
     }
-    wanted.push("agent=copse/0.1");
+    let agent = format!("agent=copse/{}", crate::VERSION);
+    wanted.push(&agent);
     let mut request = Vec::new();
     for (i, (u, old, new)) in commands.iter().enumerate() {
         let mut line = format!("{} {} {}", hex(&old.unwrap_or(NO_ID)), hex(new), u.refname());
@@ -806,7 +807,8 @@ pub fn delete_remote(repo: &Repo, remote: &str, url: &str, name: &str) -> Result
     if caps.contains("report-status") {
         wanted.push("report-status");
     }
-    wanted.push("agent=copse/0.1");
+    let agent = format!("agent=copse/{}", crate::VERSION);
+    wanted.push(&agent);
     // Only deletions, so no pack follows the commands.
     let mut request = pkt(format!("{} {} {refname}\0{}\n", hex(&old), hex(&NO_ID), wanted.join(" ")).as_bytes());
     request.extend_from_slice(FLUSH);

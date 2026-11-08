@@ -1,6 +1,6 @@
 [package]
 name = "copse"
-version = "0.1.0"
+version = "2026.11.0"
 edition = "2021"
 description = "A fast version control system that works with git servers, with undo for everything and a built-in terminal interface"
 license = "Apache-2.0"

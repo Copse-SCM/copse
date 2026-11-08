@@ -100,7 +100,8 @@ pub fn fetch(repo: &Repo, url: &str, depth: crate::remote::Depth) -> Result<Remo
         if shallow_mode && caps.contains("include-tag") {
             ask.push("include-tag");
         }
-        ask.push("agent=copse/0.1");
+        let agent = format!("agent=copse/{}", crate::VERSION);
+        ask.push(&agent);
         let mut request = pkt(format!("want {} {}\n", hex(&wants[0]), ask.join(" ")).as_bytes());
         for w in &wants[1..] {
             request.extend(pkt(format!("want {}\n", hex(w)).as_bytes()));
@@ -310,7 +311,8 @@ pub fn fetch_blobs(store: &Store, url: &str, ids: &[Id]) -> Result<()> {
     }
     let mut session = Session::open(url, "upload-pack")?;
     let (_, caps) = session.advertisement()?;
-    let mut ask = vec!["no-progress", "agent=copse/0.1"];
+    let agent = format!("agent=copse/{}", crate::VERSION);
+    let mut ask = vec!["no-progress", agent.as_str()];
     if caps.contains("ofs-delta") {
         ask.push("ofs-delta");
     }

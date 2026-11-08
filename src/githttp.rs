@@ -18,7 +18,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// GitHub only speaks the smart protocol to clients whose agent starts with "git/".
-pub const USER_AGENT: &str = "git/2.0 (copse 0.1)";
+pub fn user_agent() -> String {
+    format!("git/2.0 (copse {})", crate::VERSION)
+}
 
 struct Credential {
     username: String,
@@ -39,7 +41,7 @@ pub struct Http {
 impl Http {
     pub fn new(url: &str, service: &'static str) -> Http {
         let agent = ureq::AgentBuilder::new()
-            .user_agent(USER_AGENT)
+            .user_agent(&user_agent())
             .timeout_connect(Duration::from_secs(30))
             .redirects(5)
             .try_proxy_from_env(true)

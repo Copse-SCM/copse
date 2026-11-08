@@ -1,0 +1,66 @@
+# Build copse for every platform we ship, named with the given version. Used by the
+# release and nightly workflows; it only builds and packages, publishing is theirs.
+name: Build binaries
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The full version, e.g. 2026.11.0 or 2026.11.09-dev+abc1234
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          # The oldest supported Ubuntu, so the binary runs on older glibc too.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+    env:
+      VERSION: ${{ inputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: COPSE_BUILD="$VERSION" cargo build --release --locked --target "$TARGET"
+
+      - name: It says which version it is
+        if: matrix.target != 'x86_64-apple-darwin' # (built on Apple Silicon; can't run here)
+        run: |
+          got=$("target/$TARGET/release/copse" --version)
+          [ "$got" = "copse $VERSION" ] || { echo "::error::copse --version says '$got', not 'copse $VERSION'"; exit 1; }
+
+      - name: Package
+        run: |
+          name="copse-$VERSION-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/copse" LICENSE NOTICE README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: copse-${{ matrix.target }}
+          path: copse-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
