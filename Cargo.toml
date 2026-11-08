@@ -2,7 +2,12 @@
 name = "copse"
 version = "0.1.0"
 edition = "2021"
-description = "A small, fast, personal version control system"
+description = "A fast version control system that works with git servers, with undo for everything and a built-in terminal interface"
+repository = "https://github.com/Copse-SCM/copse"
+homepage = "https://github.com/Copse-SCM/copse"
+readme = "README.md"
+keywords = ["git", "vcs", "version-control", "tui"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1"

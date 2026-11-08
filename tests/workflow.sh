@@ -67,7 +67,7 @@ mkdir dm && cd dm && cps init >/dev/null && mkdir lib && echo a > lib/a.txt && e
 cps branch move >/dev/null && cps checkout move >/dev/null && mkdir src && mv lib/a.txt lib/b.txt src/ && rmdir lib && cps commit -m "lib/ becomes src/" >/dev/null
 cps checkout main >/dev/null && echo new > lib/new.txt && cps commit -m "a new file in lib/" >/dev/null
 out=$(cps merge move); [[ "$out" == *"added in a folder the other side moved"* ]] && [[ -f src/new.txt && ! -e lib ]] && ok "a file added in a folder the other side moved goes to the folder's new place, and it's reported" || fail "$out"
-echo "checked" >/dev/null && cps commit -m "merged" >/dev/null && same "$(cps show --stat HEAD | grep -c 'src/')" "3" "and the merge can be committed as it stands (all three files now in src/)" || fail "line $LINENO: a step before this check failed"
+cps commit -m "merged" >/dev/null && same "$(cps show --stat HEAD | grep -c 'src/')" "3" "and the merge can be committed as it stands (all three files now in src/)" || fail "line $LINENO: a step before this check failed"
 cps branch flatten HEAD~1 >/dev/null && cps checkout flatten >/dev/null && mv lib/a.txt lib/b.txt . && rm lib/new.txt && rmdir lib && cps commit -m "lib/ moved to the top" >/dev/null
 cps checkout main >/dev/null 2>&1; cps reset --hard HEAD~1 >/dev/null 2>&1; echo more > lib/more.txt && cps commit -m "another lib file" >/dev/null
 cps merge flatten >/dev/null; [[ -f more.txt && ! -e lib/more.txt ]] && ok "a folder moved to the top level: its new file follows it there" || fail "line $LINENO: more.txt didn't follow lib/ to the top"

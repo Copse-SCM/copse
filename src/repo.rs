@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn names_follow_gits_rules() {
-        for ok in ["main", "feature/login", "release/1.0", "users/zac/wip", "fix-123", "v1.0", "a%b"] {
+        for ok in ["main", "feature/login", "release/1.0", "users/me/wip", "fix-123", "v1.0", "a%b"] {
             assert!(validate_branch(ok).is_ok(), "{ok} should be allowed");
         }
         for bad in ["", "HEAD", "@", "-x", "/x", "x/", "x//y", "a..b", "x.", ".hidden", "a/.b", "x.lock", "a/b.lock",
