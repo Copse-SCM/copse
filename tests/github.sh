@@ -310,6 +310,10 @@ echo edit >> d/f2 && cps commit -m local >/dev/null && cps push >/dev/null 2>&1 
 (cd ../ptw && git pull -q origin main 2>/dev/null && echo more >> big && git commit -qam c4 && git push -q origin main)
 cps pull >/dev/null 2>&1 && same "$(tail -1 big)" "more" "pull brings new commits and their files"
 cps gc >/dev/null 2>&1 && cps fsck | has "everything is intact" && ok "gc and fsck work with files named by git ids" || fail "line $LINENO: a step before this check failed"
+cps git-view on >/dev/null && same "$(git log --format=%s | head -3 | tr '\n' ' ')" "c4 local c3 " "the .git view works in a partial clone too" || fail "line $LINENO: the .git view in a partial clone"
+same "$(git show HEAD~4:d/f1 2>&1)" "n1" "git fetches a version copse hasn't downloaded from origin, quietly, as in git's own partial clones"
+git fsck >/dev/null 2>&1 && [[ -z "$(git status --short)" ]] && ok "git fsck accepts it (objects in a promisor pack) and git status is clean" || fail "git fsck or status in a partial clone's .git view"
+cps git-view off >/dev/null
 cd "$WORK" && git init -q --bare nofilter.git && (cd ptw && git push -q ../nofilter.git main)
 { cps clone --filter=blob:none nofilter.git nf 2>&1 || true; } | has "doesn't support partial clones" && ok "a server without filters says so" || fail "line $LINENO: a step before this check failed"
 cd "$WORK"
@@ -351,10 +355,22 @@ cd "$WORK" && rm -rf l1 l1.git l1back.git && git init -q --bare l1.git && git in
 cps clone l1.git l1c >/dev/null 2>&1 && cd l1c
 same "$(cps log -n 1 --format=%s)" "Résumé du changement" "a Latin-1 message (with its encoding header) shows as readable text, as git shows it"
 cps fsck | has "everything is intact" && same "$(cps status | tail -1)" "Nothing changed." "a file name that isn't UTF-8 checks out (under a stand-in character on disk) and stays clean" || fail "line $LINENO: a step before this check failed"
+if [[ "$(uname)" == Linux ]]; then
+  [[ -e "$(printf 'caf\xe9.txt')" ]] && ok "on disk the name has git's exact bytes (Linux allows them)" || fail "Linux: $(ls | od -c | head -3)"
+else
+  ls | grep -q "^caf.*\.txt$" && ! { printf x > "$(printf 'na\xefve')"; } 2>/dev/null && ok "on disk the name uses a stand-in character (macOS refuses such names, as shown)" || fail "macOS: $(ls)"
+fi
 git init -q --bare ../l1back.git && cps remote add back ../l1back.git >/dev/null && cps push back >/dev/null 2>&1
 same "$(git -C ../l1back.git rev-parse main)" "$(git -C ../l1.git rev-parse main)" "pushed back, the commit has the same git id: every byte of the name and message kept"
 echo more > ok.txt && cps commit -m "an edit" >/dev/null && cps push back >/dev/null 2>&1
 git -C ../l1back.git ls-tree main | grep -F '"caf\351.txt"' >/dev/null && git -C ../l1back.git fsck --strict >/dev/null 2>&1 && ok "later commits keep the original bytes of the name, and git's fsck --strict agrees" || fail "line $LINENO: a step before this check failed"
+if [[ "$(uname)" == Linux ]]; then
+  # A name made by another program, not by git: copse tracks it and git gets its exact bytes.
+  echo odd > "$(printf 'na\xefve.txt')" && cps commit -m "an odd name" >/dev/null && cps push back >/dev/null 2>&1
+  git -C ../l1back.git ls-tree main | grep -F '"na\357ve.txt"' >/dev/null && ok "a non-UTF-8 name made on Linux is committed with its exact bytes" || fail "Linux: $(git -C ../l1back.git ls-tree main)"
+else
+  ok "(a non-UTF-8 name made on disk can only happen on Linux; CI's Linux run checks it)"
+fi
 cd "$WORK"
 
 echo

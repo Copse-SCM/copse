@@ -121,7 +121,7 @@ pub fn init(dir: Option<&Path>, bare: bool) -> Result<()> {
         println!("Initialized an empty bare copse repository in {}", root.display());
     } else {
         Repo::init(&root)?;
-        println!("Initialized an empty copse repository in {}", root.join(".copse").display());
+        println!("Initialized an empty copse repository in {}", crate::objects::disk_path(&root, ".copse").display());
     }
     Ok(())
 }
@@ -515,7 +515,7 @@ pub(crate) fn apply_tree(
         .cloned()
         .collect();
     for path in &to_remove {
-        let full = repo.root.join(path);
+        let full = crate::objects::disk_path(&repo.root, path);
         if full.is_dir() && !fs::symlink_metadata(&full).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
             // A submodule that's no longer here: remove its folder only if it's empty.
             if fs::remove_dir(&full).is_err() {
@@ -561,7 +561,7 @@ pub(crate) fn apply_tree(
         .par_iter()
         .map(|(path, (mode, id))| {
             let (size, mtime_ns) = if written.contains(path.as_str()) {
-                let (size, mtime, _) = stat_of(&fs::symlink_metadata(repo.root.join(path))?);
+                let (size, mtime, _) = stat_of(&fs::symlink_metadata(crate::objects::disk_path(&repo.root, path))?);
                 (size, mtime)
             } else if off_disk(path) {
                 (0, 0) // not on disk (sparse checkout): nothing to cache
@@ -577,13 +577,13 @@ pub(crate) fn apply_tree(
 }
 
 pub(crate) fn write_file(repo: &Repo, path: &str, mode: Mode, id: &Id) -> Result<()> {
-    let full = repo.root.join(path);
+    let full = crate::objects::disk_path(&repo.root, path);
     // Never write through a symlink: if a folder on the way is a link, the file
     // would land wherever it points, perhaps outside the project (git refuses too).
-    let mut at = repo.root.clone();
+    // (Each folder on the way is checked where it really is on disk; see disk_path.)
     let parts: Vec<&str> = path.split('/').collect();
-    for part in &parts[..parts.len().saturating_sub(1)] {
-        at.push(part);
+    for n in 1..parts.len() {
+        let at = crate::objects::disk_path(&repo.root, parts[..n].join("/"));
         if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
             bail!("refusing to write {path}: {} is a symlink, and writing through it could put the file somewhere else", at.strip_prefix(&repo.root).unwrap_or(&at).display());
         }

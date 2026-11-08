@@ -57,7 +57,7 @@ pub fn clean(force: bool, ignored: bool, paths: &[String]) -> Result<()> {
         crate::stash::backup(&repo, "before clean")?;
     }
     for p in new_files.iter().chain(&ignored_files) {
-        let full = repo.root.join(p);
+        let full = crate::objects::disk_path(&repo.root, p);
         fs::remove_file(&full).with_context(|| format!("removing {p}"))?;
         let mut dir = full.parent();
         while let Some(d) = dir {
@@ -114,7 +114,7 @@ pub fn grep(args: GrepArgs) -> Result<()> {
         .filter_map(|(path, id)| {
             let bytes = match id {
                 Some(id) => repo.store.get_kind(id, Kind::Blob).ok()?,
-                None => read_content(&repo.root.join(path), Mode::File).ok()?,
+                None => read_content(&crate::objects::disk_path(&repo.root, path), Mode::File).ok()?,
             };
             let text = std::str::from_utf8(&bytes).ok().filter(|t| !t.contains('\0'))?; // skip binary files
             let hits: Vec<(usize, String)> =

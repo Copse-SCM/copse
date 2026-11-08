@@ -135,7 +135,7 @@ fn push_some(repo: &Repo, head: Id, files: &[crate::worktree::File], ch: &crate:
         match head_tree.get(p.as_str()) {
             Some((mode, blob)) => crate::cmd::write_file(repo, p, *mode, blob)?,
             None => {
-                let full = repo.root.join(p.as_str());
+                let full = crate::objects::disk_path(&repo.root, p.as_str());
                 std::fs::remove_file(&full)?;
                 // Tidy folders the removal left empty.
                 let mut dir = full.parent();

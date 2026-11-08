@@ -1022,6 +1022,33 @@ pub fn to_git_bytes(s: &str) -> Vec<u8> {
     out
 }
 
+/// Where a file of the repository lives on disk. A name with bytes that aren't
+/// UTF-8 (from git) is written with those exact bytes where the system allows it
+/// (Linux); macOS doesn't allow such names, so there it keeps its stand-in characters.
+pub fn disk_path(root: &std::path::Path, path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let path = path.as_ref();
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        if let Some(s) = path.to_str() {
+            if s.chars().any(|c| (STAND_IN + 0x80..=STAND_IN + 0xFF).contains(&(c as u32))) {
+                return root.join(std::ffi::OsString::from_vec(to_git_bytes(s)));
+            }
+        }
+    }
+    root.join(path)
+}
+
+/// A path found on disk, as the repository names it: bytes that aren't UTF-8 (a
+/// name another program made on Linux) become stand-ins, so nothing is skipped.
+pub fn path_from_disk(rel: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    match rel.to_str() {
+        Some(s) => s.to_string(),
+        None => from_git_bytes(rel.as_os_str().as_bytes()),
+    }
+}
+
 /// Text with stand-ins made readable: decoded as Latin-1 when the commit says
 /// that's its encoding (as git converts messages for display), otherwise shown as
 /// U+FFFD. Text without stand-ins is returned as it is.

@@ -116,7 +116,7 @@ fn add(repo: &Repo, path: &str, rev: Option<&str>, new_branch: Option<&str>) -> 
     fs::write(wt.join("commondir"), format!("{}\n", common.display()))?;
     fs::write(wt.join("path"), format!("{}\n", root.display()))?;
     fs::write(wt.join("HEAD"), "ref: main\n")?; // replaced below
-    write_atomic(&root.join(crate::repo::DIR), format!("{WORKTREE_MARK}{}\n", wt.display()).as_bytes())?;
+    write_atomic(&crate::objects::disk_path(&root, crate::repo::DIR), format!("{WORKTREE_MARK}{}\n", wt.display()).as_bytes())?;
 
     let result = (|| -> Result<()> {
         let new = Repo::open_path(&root)?;
@@ -190,7 +190,7 @@ fn remove(repo: &Repo, path: &str, force: bool) -> Result<()> {
 fn prune(repo: &Repo) -> Result<()> {
     let mut n = 0;
     for (root, wt, _) in all(repo)?.into_iter().skip(1) {
-        if !root.join(crate::repo::DIR).exists() {
+        if !crate::objects::disk_path(&root, crate::repo::DIR).exists() {
             fs::remove_dir_all(&wt)?;
             println!("Forgot {} (its folder is gone).", root.display());
             n += 1;

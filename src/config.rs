@@ -351,7 +351,7 @@ pub fn hooks_dir(repo: &Repo) -> PathBuf {
     match get("core.hookspath") {
         Some(p) => {
             let p = expand_home(&p);
-            if p.is_absolute() { p } else { repo.root.join(p) }
+            if p.is_absolute() { p } else { crate::objects::disk_path(&repo.root, p) }
         }
         None => repo.dir.join("hooks"),
     }

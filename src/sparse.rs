@@ -74,7 +74,7 @@ pub fn write_conflicts<'a>(repo: &Repo, merged: &Files, conflicts: impl Iterator
         return Ok(());
     }
     for path in conflicts {
-        if sparse.outside(path) && !repo.root.join(path).exists() {
+        if sparse.outside(path) && !crate::objects::disk_path(&repo.root, path).exists() {
             if let Some((mode, id)) = merged.get(path) {
                 write_file(repo, path, *mode, id)?;
             }
@@ -84,7 +84,7 @@ pub fn write_conflicts<'a>(repo: &Repo, merged: &Files, conflicts: impl Iterator
 }
 
 fn remove_and_tidy(root: &Path, path: &str) -> Result<()> {
-    let full = root.join(path);
+    let full = crate::objects::disk_path(&root, path);
     fs::remove_file(&full).with_context(|| format!("removing {path}"))?;
     let mut dir = full.parent();
     while let Some(d) = dir.filter(|d| *d != root) {
@@ -104,7 +104,7 @@ fn apply(repo: &Repo, old: &Sparse, new: &Sparse) -> Result<(usize, usize)> {
     let ch = changes(&index, &files);
     // Uncommitted work in files about to disappear would be lost.
     let at_risk: Vec<&String> =
-        ch.added.iter().chain(&ch.modified).filter(|p| new.outside(p) && repo.root.join(p.as_str()).exists()).collect();
+        ch.added.iter().chain(&ch.modified).filter(|p| new.outside(p) && crate::objects::disk_path(&repo.root, p.as_str()).exists()).collect();
     if !at_risk.is_empty() {
         for p in &at_risk {
             println!("  {p}");
@@ -115,7 +115,7 @@ fn apply(repo: &Repo, old: &Sparse, new: &Sparse) -> Result<(usize, usize)> {
     let tree = flatten(&repo.store, &repo.read_commit(&head)?.tree)?;
     let (mut removed, mut written) = (0, 0);
     for (path, (mode, id)) in &tree {
-        let on_disk = repo.root.join(path).symlink_metadata().is_ok();
+        let on_disk = crate::objects::disk_path(&repo.root, path).symlink_metadata().is_ok();
         if new.outside(path) && on_disk && index.entries.contains_key(path) {
             remove_and_tidy(&repo.root, path)?;
             removed += 1;

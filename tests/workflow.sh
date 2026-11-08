@@ -105,7 +105,7 @@ mkdir ffs && cd ffs && cps init >/dev/null && echo a > a && cps commit -m a >/de
 cps merge -s ours s >/dev/null && [[ ! -e b ]] && same "$(parents)" "1" "-s ours makes a merge commit even where a fast-forward would do, as git does"
 cd ..
 (cd copse && expect_fail "-s theirs is refused with a pointer to -X theirs" "-X theirs" cps merge -s theirs side)
-(cd copse && expect_fail "unknown -X options are refused" "isn't supported" cps merge -X patience side)
+(cd copse && expect_fail "unknown -X options are refused" "isn't known" cps merge -X bogus side)
 cp -R git git-cp && cp -R copse copse-cp
 (cd git-cp && git cherry-pick -X theirs side >/dev/null 2>&1 || true)
 (cd copse-cp && cps cherry-pick -X theirs side >/dev/null 2>&1 || true)
@@ -121,6 +121,68 @@ out=$(cps rebase -X theirs main 2>&1 || true); [[ "$out" == *"d.txt"* ]] || fail
 rm d.txt && cps rebase --continue >/dev/null 2>&1 && same "$(sed -n 3p f.txt) $(titles -n 1)" "topic-3 topic edits 3" "rebase --continue keeps -X theirs for the steps after a pause"
 cd ..
 cd ..
+
+echo "== more -X options and -s strategies (checked against git)"
+cd "$WORK" && mkdir xo && cd xo
+labels() { sed -e 's/^<<<<<<< .*/<<<<<<</' -e 's/^>>>>>>> .*/>>>>>>>/' "$1"; }  # git says HEAD where copse names the branch
+xmerge() {  # $1 = -X option; base/ours/theirs in ../b ../o ../t; compares git and copse
+  rm -rf g c
+  for tool in git copse; do
+    d=${tool:0:1}; mkdir $d && (
+      cd $d; [[ $tool == git ]] && git init -q -b main || cps init >/dev/null
+      cp ../b f.txt; if [[ $tool == git ]]; then git add -A && git commit -qm base && git branch side; else cps commit -m base >/dev/null && cps branch side >/dev/null; fi
+      cp ../o f.txt; if [[ $tool == git ]]; then git commit -qam ours && git checkout -q side; else cps commit -m ours >/dev/null && cps checkout side >/dev/null; fi
+      cp ../t f.txt; if [[ $tool == git ]]; then git commit -qam theirs && git checkout -q main; else cps commit -m theirs >/dev/null && cps checkout main >/dev/null; fi
+      if [[ $tool == git ]]; then git merge -q -X "$1" side -m m >/dev/null 2>&1 || true; else cps merge -X "$1" side -m m >/dev/null 2>&1 || true; fi
+    )
+  done
+  [[ "$(labels g/f.txt)" == "$(labels c/f.txt)" ]]
+}
+printf 'a\nb  c\nd\ne\nf\ng\nh\n' > b; printf 'a\nb c\nd\ne\nf\ng\nh-ours\n' > o; printf 'a\nb  c  \nD\ne\nf\ng\nh\n' > t
+for x in ignore-space-change ignore-all-space ignore-space-at-eol patience diff-algorithm=histogram diff-algorithm=minimal; do
+  xmerge "$x" || fail "-X $x differs from git: $(diff <(labels g/f.txt) <(labels c/f.txt))"
+done
+ok "-X ignore-space-change, ignore-all-space, ignore-space-at-eol, patience and diff-algorithm= merge as git does"
+xmerge ignore-space-change && same "$(sed -n 2p c/f.txt) $(sed -n 3p c/f.txt)" "b c D" "with whitespace ignored, our respacing is kept while their real change merges in"
+printf 'x\ny\nz\n' > b; printf 'x\r\ny\r\nz-ours\r\n' > o; printf 'X\ny\nz\n' > t
+xmerge ignore-cr-at-eol && ok "-X ignore-cr-at-eol (Windows line endings on one side) merges as git does" || fail "ignore-cr-at-eol differs from git"
+rm -rf g c
+for tool in git copse; do
+  d=${tool:0:1}; mkdir $d && (
+    cd $d; [[ $tool == git ]] && git init -q -b main || cps init >/dev/null
+    seq 101 120 > a.txt; if [[ $tool == git ]]; then git add -A && git commit -qm base && git branch side; else cps commit -m base >/dev/null && cps branch side >/dev/null; fi
+    rm a.txt; (seq 101 113; seq 914 920) > b.txt   # a 65% similar rename
+    if [[ $tool == git ]]; then git add -A && git commit -qm ren && git checkout -q side; else cps commit -m ren >/dev/null && cps checkout side >/dev/null; fi
+    sedi 's/^101$/ONE/' a.txt; if [[ $tool == git ]]; then git commit -qam edit && git checkout -q main; else cps commit -m edit >/dev/null && cps checkout main >/dev/null; fi
+  )
+done
+for x in find-renames=60 find-renames=70 rename-threshold=66% find-renames=.6; do
+  rm -rf g2 c2 && cp -R g g2 && cp -R c c2
+  (cd g2 && git merge -q -X "$x" side -m m >/dev/null 2>&1 || true); (cd c2 && cps merge -X "$x" side -m m >/dev/null 2>&1 || true)
+  [[ "$(cd g2 && ls) $(head -1 g2/b.txt)" == "$(cd c2 && ls) $(head -1 c2/b.txt)" ]] || fail "-X $x differs from git"
+done
+ok "-X find-renames=N / rename-threshold=N decide what counts as a rename, as in git (60 finds it, 70 doesn't)"
+cd "$WORK" && mkdir oct && cd oct
+for tool in git copse; do
+  d=${tool:0:1}; mkdir $d && (
+    cd $d; [[ $tool == git ]] && git init -q -b main || cps init >/dev/null
+    echo base > base.txt; if [[ $tool == git ]]; then git add -A && git commit -qm base; else cps commit -m base >/dev/null; fi
+    for br in one two three; do
+      if [[ $tool == git ]]; then git checkout -q -b $br main && echo $br > $br.txt && git add -A && git commit -qm $br; else cps checkout main >/dev/null && cps branch $br >/dev/null && cps checkout $br >/dev/null && echo $br > $br.txt && cps commit -m $br >/dev/null; fi
+    done
+    if [[ $tool == git ]]; then git checkout -q main && echo m > m.txt && git add -A && git commit -qm m && git merge -q one two three -m oct >/dev/null; else cps checkout main >/dev/null && echo m > m.txt && cps commit -m m >/dev/null && cps merge one two three -m oct >/dev/null; fi
+  )
+done
+same "$(cd c && ls | tr '\n' ' ')$(cd c && cps cat-file -p HEAD | grep -c ^parent)" "$(cd g && ls | tr '\n' ' ')$(git -C g log -1 --format=%P | wc -w | tr -d ' ')" "merge A B C makes one commit with all four parents, as git's octopus does"
+cd c && cps branch clash one~1 >/dev/null && cps checkout clash >/dev/null && echo clash > one.txt && cps commit -m clash >/dev/null && cps checkout main >/dev/null && cps branch one2 >/dev/null
+cps branch -D one2 >/dev/null; before=$(cps log -n 1 --format=%H)
+cps checkout main >/dev/null; cps branch onex one >/dev/null
+expect_fail "a conflict in a several-branch merge stops it, changing nothing (as git's octopus does)" "merge them one at a time" cps merge two clash onex
+same "$(cps log -n 1 --format=%H) $(cps status --porcelain | grep -c '^[AMDC] ' || true)" "$before 0" "and nothing was changed"
+same "$(cps log -1 --format=%s)" "oct" "log -1 means -n 1, as in git"
+cd "$WORK"
+(cd strat/copse && expect_fail "-s subtree is refused, saying why" "isn't supported" cps merge -s subtree side)
+(cd strat/copse && { cps merge -s resolve side -m r 2>&1 || true; } | has "conflict") && ok "-s resolve is the normal merge (here it stops on the same conflicts)" || fail "line $LINENO: -s resolve"
 
 echo "== fast-forward pulls touch only what changed"
 mkdir ff && cd ff && cps init >/dev/null && mkdir -p src docs && echo a > src/a.txt && echo b > src/b.txt && echo d > docs/d.txt && echo k > keep.txt && cps commit -m base >/dev/null

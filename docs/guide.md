@@ -566,10 +566,10 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 |---|---|---|
 | `branches.sh` | 54 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
 | `bridge.sh` | 42 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
-| `commit.sh` | 59 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
+| `commit.sh` | 61 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
-| `github.sh` | 124 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
+| `github.sh` | 129 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
 | `investigate.sh` | 33 | `blame` (every line compared with `git blame`) and `bisect` |
@@ -585,7 +585,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `tags.sh` | 20 | Local tags |
 | `tui.sh` | 76 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |
-| `workflow.sh` | 65 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
+| `workflow.sh` | 74 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
 
 `cargo test` runs unit tests for merging, hunks, the rebase list, timezones and git's formats (checked against hashes real git produces). `tests/fuzz.py` is a randomized stress test: it builds the same random histories in git and copse (edits, inserts, deletions, new files, renames, folder moves), then merges, rebases and cherry-picks in both and compares the results file by file. Run `tests/fuzz.py 500 <seed>`; 2,000 rounds across eight seeds match git exactly.
 

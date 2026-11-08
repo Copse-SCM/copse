@@ -60,7 +60,7 @@ fn walk(store: &Store, old: Option<Id>, new: Option<Id>, prefix: &str, out: &mut
 
 /// Is the file at `path` exactly what the index says (no uncommitted edit)?
 fn unchanged_on_disk(repo: &Repo, index: &Index, path: &str, e: &Entry) -> Result<bool> {
-    let full = repo.root.join(path);
+    let full = crate::objects::disk_path(&repo.root, path);
     let Ok(md) = fs::symlink_metadata(&full) else { return Ok(false) };
     if e.mode == Mode::Submodule {
         return Ok(md.is_dir());
@@ -91,7 +91,7 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
     // First, check everything: nothing is written unless all of it is safe.
     let mut in_the_way = Vec::new();
     for (path, before, _after) in &changes {
-        let on_disk = fs::symlink_metadata(repo.root.join(path)).is_ok();
+        let on_disk = fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)).is_ok();
         match (index.entries.get(path), before) {
             (Some(e), Some(_)) => {
                 let absent_by_design = !on_disk && (sparse.outside(path) || e.mode == Mode::Submodule);
@@ -100,7 +100,7 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
                 }
             }
             // A file the pull adds, where an untracked file already is.
-            (None, None) if on_disk && !fs::metadata(repo.root.join(path)).is_ok_and(|m| m.is_dir()) => {
+            (None, None) if on_disk && !fs::metadata(crate::objects::disk_path(&repo.root, path)).is_ok_and(|m| m.is_dir()) => {
                 in_the_way.push(format!("{path} (untracked here)"));
             }
             _ => {}
@@ -118,7 +118,7 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
     for (path, before, after) in &changes {
         if before.is_some() && after.is_none() {
             index.entries.remove(path);
-            let full = repo.root.join(path);
+            let full = crate::objects::disk_path(&repo.root, path);
             match fs::symlink_metadata(&full) {
                 Ok(md) if md.is_dir() => {
                     let _ = fs::remove_dir(&full); // an emptied submodule folder; kept if it has files
@@ -141,7 +141,7 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
     let writes: Vec<(&str, Mode, Id)> = changes
         .iter()
         .filter_map(|(p, _, after)| after.map(|(m, id)| (p.as_str(), m, id)))
-        .filter(|(p, m, _)| !(sparse.outside(p) && !repo.root.join(p).exists() && *m != Mode::Submodule))
+        .filter(|(p, m, _)| !(sparse.outside(p) && !crate::objects::disk_path(&repo.root, p).exists() && *m != Mode::Submodule))
         .collect();
     let skipped: Vec<(&str, Mode, Id)> = changes
         .iter()
@@ -162,7 +162,7 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
     writes.par_iter().try_for_each(|(path, mode, id)| write_file(repo, path, *mode, id).with_context(|| format!("writing {path}")))?;
     crate::lfs::after_checkout(repo, &lfs, &writes)?;
     for (path, mode, id) in &writes {
-        let (size, mtime) = match fs::symlink_metadata(repo.root.join(path)) {
+        let (size, mtime) = match fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)) {
             Ok(md) if *mode != Mode::Submodule => {
                 let (s, m, _) = stat_of(&md);
                 (s, m)

@@ -43,7 +43,7 @@ pub fn parse_gitmodules(text: &str) -> Vec<(String, String, String)> {
 
 /// Paths .gitmodules (in the working directory) declares as submodules.
 pub fn declared_paths(root: &Path) -> HashSet<String> {
-    match fs::read_to_string(root.join(".gitmodules")) {
+    match fs::read_to_string(crate::objects::disk_path(&root, ".gitmodules")) {
         Ok(t) => parse_gitmodules(&t).into_iter().map(|(_, p, _)| p).collect(),
         Err(_) => HashSet::new(),
     }
@@ -121,7 +121,7 @@ fn copse(dir: &Path, args: &[&str]) -> Result<()> {
 
 /// Check one submodule out at `pin`. Returns what happened.
 fn update_one(repo: &Repo, path: &str, pin: &Id, url: Option<&str>, init: bool) -> Result<String> {
-    let dir = repo.root.join(path);
+    let dir = crate::objects::disk_path(&repo.root, path);
     let present = dir.join(".copse").exists();
     if !present {
         if dir.join(".git").exists() {
@@ -163,7 +163,7 @@ pub fn submodule(cmd: SubmoduleCmd) -> Result<()> {
         Some(h) => flatten(&repo.store, &repo.read_commit(&h)?.tree)?,
         None => Files::new(),
     };
-    let modules = fs::read_to_string(repo.root.join(".gitmodules")).map(|t| parse_gitmodules(&t)).unwrap_or_default();
+    let modules = fs::read_to_string(crate::objects::disk_path(&repo.root, ".gitmodules")).map(|t| parse_gitmodules(&t)).unwrap_or_default();
     let url_of = |path: &str| modules.iter().find(|(_, p, _)| p == path).map(|(_, _, u)| u.clone());
     match cmd {
         SubmoduleCmd::Status => {
@@ -173,7 +173,7 @@ pub fn submodule(cmd: SubmoduleCmd) -> Result<()> {
             }
             for (path, pin) in subs {
                 let hex = gitlink_hex(&pin);
-                let dir = repo.root.join(&path);
+                let dir = crate::objects::disk_path(&repo.root, &path);
                 match head_gitlink(&dir) {
                     None => println!("-{}  {path}  {}", &hex[..10], paint("2", "(not checked out; `copse submodule update --init`)")),
                     Some(now) if now == pin => println!(" {}  {path}", &hex[..10]),
@@ -197,7 +197,7 @@ pub fn submodule(cmd: SubmoduleCmd) -> Result<()> {
         }
         SubmoduleCmd::Add { url, path } => {
             let spec = crate::restore::repo_path(&repo, path)?;
-            let dir = repo.root.join(&spec);
+            let dir = crate::objects::disk_path(&repo.root, &spec);
             if dir.exists() && fs::read_dir(&dir)?.next().is_some() {
                 bail!("{path} already exists and isn't empty");
             }
@@ -206,12 +206,12 @@ pub fn submodule(cmd: SubmoduleCmd) -> Result<()> {
             }
             let clone_from = resolve_url(&repo, url)?;
             copse(&repo.root, &["clone", "--", &clone_from, &spec])?;
-            let mut text = fs::read_to_string(repo.root.join(".gitmodules")).unwrap_or_default();
+            let mut text = fs::read_to_string(crate::objects::disk_path(&repo.root, ".gitmodules")).unwrap_or_default();
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
             }
             text += &format!("[submodule \"{spec}\"]\n\tpath = {spec}\n\turl = {url}\n");
-            fs::write(repo.root.join(".gitmodules"), text)?;
+            fs::write(crate::objects::disk_path(&repo.root, ".gitmodules"), text)?;
             println!("Added submodule {spec} (from {url}). Commit to record it: copse commit -m \"Add {spec}\"");
         }
     }

@@ -49,9 +49,9 @@ impl Side {
         if self.worktree {
             // An LFS file is compared as its pointer, as git (without git-lfs's diff driver) does.
             if matches!(mode, Mode::File | Mode::Exec) && crate::lfs::Attrs::load(&repo.root).tracked(path) {
-                return crate::lfs::clean(&repo.dir, &repo.root.join(path), false);
+                return crate::lfs::clean(&repo.dir, &crate::objects::disk_path(&repo.root, path), false);
             }
-            Ok(read_content(&repo.root.join(path), mode)?)
+            Ok(read_content(&crate::objects::disk_path(&repo.root, path), mode)?)
         } else {
             repo.store.get_kind(id, Kind::Blob)
         }

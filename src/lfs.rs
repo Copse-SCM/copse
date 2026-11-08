@@ -69,7 +69,7 @@ pub struct Attrs {
 
 impl Attrs {
     pub fn load(root: &Path) -> Attrs {
-        let Ok(text) = fs::read_to_string(root.join(".gitattributes")) else { return Attrs { matcher: None } };
+        let Ok(text) = fs::read_to_string(crate::objects::disk_path(&root, ".gitattributes")) else { return Attrs { matcher: None } };
         Self::from_text(root, &text)
     }
 
@@ -211,7 +211,7 @@ fn endpoint(repo: &Repo, remote: &str) -> Result<String> {
     if let Some(u) = crate::config::get("lfs.url") {
         return Ok(u.trim_end_matches('/').to_string());
     }
-    if let Ok(text) = fs::read_to_string(repo.root.join(".lfsconfig")) {
+    if let Ok(text) = fs::read_to_string(crate::objects::disk_path(&repo.root, ".lfsconfig")) {
         let mut in_lfs = false;
         for line in text.lines() {
             let t = line.trim();
@@ -260,27 +260,27 @@ fn batch(http: &mut Http, url: &str, operation: &str, pointers: &[Pointer]) -> R
     })
     .to_string();
     let target = format!("{url}/objects/batch");
-    let resp = http.send(|agent, auth| {
-        let mut req = agent.post(&target).set("Accept", MEDIA).set("Content-Type", MEDIA);
-        if let Some(a) = auth {
-            req = req.set("Authorization", a);
-        }
-        req.send_string(&body)
-    })?;
-    let v: Value = serde_json::from_reader(resp.into_reader()).context("the LFS server's reply isn't valid JSON")?;
+    let resp = http.send("POST", &target, &[("Accept", MEDIA), ("Content-Type", MEDIA)], Some(body.as_bytes()))?;
+    let v: Value = serde_json::from_reader(resp.reader()).context("the LFS server's reply isn't valid JSON")?;
     Ok(v.get("objects").and_then(Value::as_array).cloned().unwrap_or_default())
 }
 
-fn request_with_headers(agent: &ureq::Agent, method: &str, href: &str, headers: &Value) -> ureq::Request {
-    let mut req = agent.request(method, href);
+/// A request to an LFS transfer address, with the headers the batch reply gave for
+/// it. Statuses of 400 and above are errors.
+fn transfer(agent: &ureq::Agent, method: &str, href: &str, headers: &Value, extra: &[(&str, &str)], body: Option<&[u8]>) -> Result<crate::githttp::Reply> {
+    let mut all: Vec<(&str, &str)> = extra.to_vec();
     if let Some(h) = headers.as_object() {
         for (k, v) in h {
             if let Some(v) = v.as_str() {
-                req = req.set(k, v);
+                all.push((k.as_str(), v));
             }
         }
     }
-    req
+    let resp = crate::githttp::request(agent, method, href, &all, body)?;
+    if resp.status >= 400 {
+        bail!("the server replied {}", resp.status);
+    }
+    Ok(resp)
 }
 
 /// Download contents into the cache. Returns how many arrived.
@@ -292,7 +292,7 @@ pub fn download(repo: &Repo, pointers: &[Pointer]) -> Result<usize> {
     let remote = default_remote(repo)?;
     let url = endpoint(repo, &remote)?;
     let mut http = Http::new(&url, "upload-pack");
-    let agent = ureq::AgentBuilder::new().user_agent(&crate::githttp::user_agent()).build();
+    let agent = crate::githttp::new_agent();
     let mut got = 0;
     for obj in batch(&mut http, &url, "download", &missing)? {
         let oid = obj["oid"].as_str().unwrap_or_default().to_string();
@@ -302,15 +302,13 @@ pub fn download(repo: &Repo, pointers: &[Pointer]) -> Result<usize> {
         }
         let action = &obj["actions"]["download"];
         let href = action["href"].as_str().with_context(|| format!("the LFS server gave no download address for {}", &oid[..12]))?;
-        let resp = request_with_headers(&agent, "GET", href, &action["header"])
-            .call()
-            .map_err(|e| anyhow::anyhow!("downloading LFS object {}: {e}", &oid[..12]))?;
+        let resp = transfer(&agent, "GET", href, &action["header"], &[], None).with_context(|| format!("downloading LFS object {}", &oid[..12]))?;
         // Check what arrived really is that object before keeping it.
         let tmp = repo.dir.join("lfs").join("tmp").join(format!("dl-{}-{}", std::process::id(), rand_suffix()));
         fs::create_dir_all(tmp.parent().unwrap())?;
         let mut out = fs::File::create(&tmp)?;
         let mut hasher = Sha256::new();
-        let mut reader = resp.into_reader();
+        let mut reader = resp.reader();
         let mut buf = vec![0u8; 1 << 20];
         let mut size = 0u64;
         loop {
@@ -348,7 +346,7 @@ pub fn upload(repo: &Repo, remote: &str, pointers: &[Pointer]) -> Result<usize> 
     let url = endpoint(repo, remote)?;
     let mut http = Http::new(&url, "receive-pack");
     let objects = batch(&mut http, &url, "upload", pointers)?;
-    let agent = ureq::AgentBuilder::new().user_agent(&crate::githttp::user_agent()).build();
+    let agent = crate::githttp::new_agent();
     let mut sent = 0;
     for obj in objects {
         let oid = obj["oid"].as_str().unwrap_or_default().to_string();
@@ -359,16 +357,13 @@ pub fn upload(repo: &Repo, remote: &str, pointers: &[Pointer]) -> Result<usize> 
         let Some(action) = obj["actions"].get("upload") else { continue }; // already there
         let href = action["href"].as_str().context("the LFS server gave no upload address")?;
         let data = fs::read(cache_path(&repo.dir, &p.oid))?;
-        request_with_headers(&agent, "PUT", href, &action["header"])
-            .set("Content-Type", "application/octet-stream")
-            .send_bytes(&data)
-            .map_err(|e| anyhow::anyhow!("uploading LFS object {}: {e}", &oid[..12]))?;
+        transfer(&agent, "PUT", href, &action["header"], &[("Content-Type", "application/octet-stream")], Some(&data))
+            .with_context(|| format!("uploading LFS object {}", &oid[..12]))?;
         if let Some(verify) = obj["actions"].get("verify") {
             let href = verify["href"].as_str().unwrap_or_default();
-            request_with_headers(&agent, "POST", href, &verify["header"])
-                .set("Content-Type", MEDIA)
-                .send_string(&json!({"oid": p.oid, "size": p.size}).to_string())
-                .map_err(|e| anyhow::anyhow!("verifying LFS object {}: {e}", &oid[..12]))?;
+            let note = json!({"oid": p.oid, "size": p.size}).to_string();
+            transfer(&agent, "POST", href, &verify["header"], &[("Content-Type", MEDIA)], Some(note.as_bytes()))
+                .with_context(|| format!("verifying LFS object {}", &oid[..12]))?;
         }
         sent += 1;
     }
@@ -440,7 +435,7 @@ pub fn after_checkout(repo: &Repo, attrs: &Attrs, files: &[(&str, Mode, Id)]) ->
             continue;
         }
         if let Some(p) = pointers_in(repo, &[*id])?.into_iter().next() {
-            let full = repo.root.join(path);
+            let full = crate::objects::disk_path(&repo.root, path);
             let is_pointer = fs::read(&full).map(|d| Pointer::parse(&d).is_some()).unwrap_or(false);
             if is_pointer && cached(&repo.dir, &p) {
                 smudge(&repo.dir, &p, &full)?;
@@ -463,7 +458,7 @@ pub enum LfsCmd<'a> {
 
 pub fn lfs(cmd: LfsCmd) -> Result<()> {
     let repo = Repo::find()?;
-    let attrs_path = repo.root.join(".gitattributes");
+    let attrs_path = crate::objects::disk_path(&repo.root, ".gitattributes");
     match cmd {
         LfsCmd::Track(patterns) => {
             if patterns.is_empty() {
@@ -528,7 +523,7 @@ pub fn lfs(cmd: LfsCmd) -> Result<()> {
             let n = download(&repo, &pointers)?;
             let mut written = 0;
             for (path, p) in paths {
-                let full = repo.root.join(&path);
+                let full = crate::objects::disk_path(&repo.root, &path);
                 let on_disk_is_pointer = fs::read(&full).map(|d| Pointer::parse(&d).is_some()).unwrap_or(true);
                 if on_disk_is_pointer && smudge(&repo.dir, &p, &full)? {
                     written += 1;

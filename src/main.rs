@@ -567,7 +567,8 @@ enum Command {
     },
     /// Merge a branch or commit into the current branch
     Merge {
-        target: Option<String>,
+        /// One branch or commit, or several (merged together in one commit)
+        targets: Vec<String>,
         /// Give up on a merge that stopped on conflicts
         #[arg(long)]
         abort: bool,
@@ -809,9 +810,29 @@ fn with_x(xs: &[String], run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Re
     run()
 }
 
+/// git's `log -3` means `log -n 3`; copse takes it too (before any `--`).
+fn log_count_shorthand(args: Vec<String>) -> Vec<String> {
+    if args.get(1).map(String::as_str) != Some("log") {
+        return args;
+    }
+    let mut out = Vec::with_capacity(args.len() + 1);
+    let mut after_dashes = false;
+    for a in args {
+        after_dashes |= a == "--";
+        match a.strip_prefix('-').filter(|n| !after_dashes && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
+            Some(n) => {
+                out.push("-n".to_string());
+                out.push(n.to_string());
+            }
+            None => out.push(a),
+        }
+    }
+    out
+}
+
 fn main() {
     quiet_on_closed_stdout();
-    let args = expand_aliases(std::env::args().collect());
+    let args = log_count_shorthand(expand_aliases(std::env::args().collect()));
     let cli = Cli::parse_from(&args);
     let Some(command) = &cli.command else {
         // `copse` on its own: the interactive screen in a terminal, the help otherwise.
@@ -951,8 +972,15 @@ fn main() {
             unset: *unset,
             list: *list,
         }),
-        Command::Merge { target, abort, no_ff, ff_only, message, strategy, strategy_option } => with_x(strategy_option, || {
+        Command::Merge { targets, abort, no_ff, ff_only, message, strategy, strategy_option } => with_x(strategy_option, || {
             let strategy = merge::parse_strategy(strategy.as_deref())?;
+            if targets.len() > 1 || (strategy == merge::Strategy::Octopus && !targets.is_empty()) {
+                if *abort || *ff_only || strategy == merge::Strategy::Ours {
+                    anyhow::bail!("merging several branches at once doesn't go with --abort, --ff-only or -s ours");
+                }
+                return merge::merge_octopus(targets, message.as_deref());
+            }
+            let target = targets.first();
             let ff = if *no_ff {
                 merge::FastForward::Never
             } else if *ff_only {
@@ -960,7 +988,7 @@ fn main() {
             } else {
                 merge::FastForward::Allow
             };
-            merge::merge_with(target.as_deref(), *abort, ff, message.as_deref(), strategy)
+            merge::merge_with(target.map(String::as_str), *abort, ff, message.as_deref(), strategy)
         }),
         Command::Diff { revs, stat, paths } => diffs::diff(revs, paths, *stat),
         Command::Show { rev, stat } => diffs::show(rev.as_deref(), *stat),

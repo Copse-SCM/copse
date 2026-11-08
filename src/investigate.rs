@@ -60,7 +60,7 @@ pub fn blame(path: &str, rev: Option<&str>, range: Option<&str>) -> Result<()> {
     // The text being explained: your file as it is now, or the file in REV.
     let (final_lines, from_worktree) = match rev {
         None if !repo.is_bare() => {
-            let bytes = read_content(&repo.root.join(&spec), Mode::File).with_context(|| format!("can't read {path}"))?;
+            let bytes = read_content(&crate::objects::disk_path(&repo.root, &spec), Mode::File).with_context(|| format!("can't read {path}"))?;
             let text = std::str::from_utf8(&bytes).ok().filter(|t| !t.contains('\0')).with_context(|| format!("{path} isn't a text file"))?;
             (text.lines().map(str::to_string).collect::<Vec<_>>(), true)
         }

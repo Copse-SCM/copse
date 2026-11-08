@@ -9,7 +9,6 @@ use crate::repo::write_atomic;
 use anyhow::{Context, Result};
 use ignore::{WalkBuilder, WalkState};
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
@@ -22,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// write in the same clock tick as the index save would not change the mtime.
 pub const RACY_WINDOW_NS: i64 = 2_000_000_000;
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Entry {
     pub size: u64,
     pub mtime_ns: i64,
@@ -30,7 +29,7 @@ pub struct Entry {
     pub id: [u8; 32],
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Default)]
 pub struct Index {
     pub written_ns: i64,
     pub entries: BTreeMap<String, Entry>,
@@ -39,7 +38,7 @@ pub struct Index {
 impl Index {
     pub fn load(dir: &Path) -> Result<Index> {
         match fs::read(dir.join("index")) {
-            Ok(bytes) => bincode::deserialize(&bytes).context("the index file is corrupt"),
+            Ok(bytes) => Index::decode(&bytes).context("the index file is corrupt"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Index::default()),
             Err(e) => Err(e.into()),
         }
@@ -47,7 +46,110 @@ impl Index {
 
     pub fn save(&mut self, dir: &Path) -> Result<()> {
         self.written_ns = now_ns();
-        write_atomic(&dir.join("index"), &bincode::serialize(self)?)
+        write_atomic(&dir.join("index"), &self.encode())
+    }
+
+    /// The index file's bytes. The layout is the one bincode 1 wrote (copse used it
+    /// before; it's now unmaintained), so every existing index still reads:
+    /// written_ns i64, the entry count u64, then per entry its path (length u64 +
+    /// UTF-8), size u64, mtime_ns i64, mode u32, id 32 bytes. All little-endian.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 + self.entries.len() * 96);
+        out.extend_from_slice(&self.written_ns.to_le_bytes());
+        out.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
+        for (path, e) in &self.entries {
+            out.extend_from_slice(&(path.len() as u64).to_le_bytes());
+            out.extend_from_slice(path.as_bytes());
+            out.extend_from_slice(&e.size.to_le_bytes());
+            out.extend_from_slice(&e.mtime_ns.to_le_bytes());
+            out.extend_from_slice(&(mode_number(e.mode)).to_le_bytes());
+            out.extend_from_slice(&e.id);
+        }
+        out
+    }
+
+    pub fn decode(mut b: &[u8]) -> Result<Index> {
+        fn take<'a>(b: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
+            anyhow::ensure!(b.len() >= n, "it ends too soon");
+            let (head, rest) = b.split_at(n);
+            *b = rest;
+            Ok(head)
+        }
+        let u64_ = |b: &mut &[u8]| -> Result<u64> { Ok(u64::from_le_bytes(take(b, 8)?.try_into().unwrap())) };
+        let written_ns = u64_(&mut b)? as i64;
+        let count = u64_(&mut b)?;
+        anyhow::ensure!(count <= (b.len() / 60) as u64, "it lists more entries than it holds");
+        let mut entries = BTreeMap::new();
+        for _ in 0..count {
+            let len = u64_(&mut b)? as usize;
+            let path = String::from_utf8(take(&mut b, len)?.to_vec()).context("a path isn't UTF-8")?;
+            let size = u64_(&mut b)?;
+            let mtime_ns = u64_(&mut b)? as i64;
+            let mode = mode_from_number(u32::from_le_bytes(take(&mut b, 4)?.try_into().unwrap()))?;
+            let id: [u8; 32] = take(&mut b, 32)?.try_into().unwrap();
+            entries.insert(path, Entry { size, mtime_ns, mode, id });
+        }
+        anyhow::ensure!(b.is_empty(), "it has extra bytes at the end");
+        Ok(Index { written_ns, entries })
+    }
+}
+
+/// A mode's number in the index file (its place in `Mode`, as bincode numbered it).
+fn mode_number(m: Mode) -> u32 {
+    match m {
+        Mode::File => 0,
+        Mode::Exec => 1,
+        Mode::Link => 2,
+        Mode::Dir => 3,
+        Mode::Submodule => 4,
+    }
+}
+
+fn mode_from_number(n: u32) -> Result<Mode> {
+    Ok(match n {
+        0 => Mode::File,
+        1 => Mode::Exec,
+        2 => Mode::Link,
+        3 => Mode::Dir,
+        4 => Mode::Submodule,
+        _ => anyhow::bail!("unknown file mode {n}"),
+    })
+}
+
+#[cfg(test)]
+mod index_format_tests {
+    use super::*;
+
+    fn sample() -> Index {
+        let mut entries = BTreeMap::new();
+        entries.insert("a.txt".to_string(), Entry { size: 5, mtime_ns: 1_700_000_000_123_456_789, mode: Mode::File, id: [7; 32] });
+        entries.insert("bin/run".to_string(), Entry { size: 99, mtime_ns: -3, mode: Mode::Exec, id: [0xab; 32] });
+        entries.insert("ünï/link".to_string(), Entry { size: 0, mtime_ns: 0, mode: Mode::Link, id: [1; 32] });
+        entries.insert("sub".to_string(), Entry { size: 0, mtime_ns: 0, mode: Mode::Submodule, id: [2; 32] });
+        Index { written_ns: 1_794_000_000_000_000_000, entries }
+    }
+
+    #[test]
+    fn same_bytes_as_bincode_wrote() {
+        // Written by bincode 1.3 for sample(), before copse stopped using it.
+        const BINCODE: &str = include_str!("index_format_vector.hex");
+        let want: Vec<u8> = (0..BINCODE.trim().len()).step_by(2).map(|i| u8::from_str_radix(&BINCODE.trim()[i..i + 2], 16).unwrap()).collect();
+        assert_eq!(sample().encode(), want);
+        let back = Index::decode(&want).unwrap();
+        assert_eq!(back.written_ns, sample().written_ns);
+        assert_eq!(back.encode(), want);
+    }
+
+    #[test]
+    fn damaged_files_are_refused() {
+        let good = sample().encode();
+        assert!(Index::decode(&good[..good.len() - 1]).is_err());
+        let mut extra = good.clone();
+        extra.push(0);
+        assert!(Index::decode(&extra).is_err());
+        let mut huge = good.clone();
+        huge[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(Index::decode(&huge).is_err());
     }
 }
 
@@ -154,10 +256,9 @@ fn scan(root: &Path) -> Vec<Stat> {
                     }
                 };
                 let rel = entry.path().strip_prefix(root).expect("walked outside the repository");
-                let Some(path) = rel.to_str() else {
-                    eprintln!("copse: warning: skipping non-UTF-8 path {}", rel.display());
-                    return WalkState::Continue;
-                };
+                // A name that isn't UTF-8 (made by another program on Linux) is kept,
+                // with stand-ins for its odd bytes, rather than skipped.
+                let path = crate::objects::path_from_disk(rel);
                 let (size, mtime_ns, mode) = stat_of(&md);
                 found.lock().unwrap().push(Stat { path: path.to_string(), size, mtime_ns, mode });
                 WalkState::Continue
@@ -231,7 +332,7 @@ pub fn snapshot(root: &Path, index: &Index, store: Option<&Store>) -> Result<Vec
         .map(|s| {
             if s.mode == Mode::Submodule {
                 // Its entry is the commit it has checked out (or, if that can't be told, what's committed).
-                let id = crate::submodules::head_gitlink(&root.join(&s.path))
+                let id = crate::submodules::head_gitlink(&crate::objects::disk_path(&root, &s.path))
                     .or_else(|| index.entries.get(&s.path).map(|e| Id::from_bytes(e.id)))
                     .with_context(|| format!("can't tell which commit the submodule {} is on", s.path))?;
                 return Ok(File { size: 0, mtime_ns: 0, mode: Mode::Submodule, id, hashed: false, absent: false, path: s.path });
@@ -244,17 +345,17 @@ pub fn snapshot(root: &Path, index: &Index, store: Option<&Store>) -> Result<Vec
             }
             if let (Some(dir), Mode::File | Mode::Exec) = (&lfs_dir, s.mode) {
                 if lfs.tracked(&s.path) {
-                    let id = crate::lfs::snapshot_blob(dir, &root.join(&s.path), store).with_context(|| format!("reading {}", s.path))?;
+                    let id = crate::lfs::snapshot_blob(dir, &crate::objects::disk_path(&root, &s.path), store).with_context(|| format!("reading {}", s.path))?;
                     return Ok(File { size: s.size, mtime_ns: s.mtime_ns, mode: s.mode, id, hashed: true, absent: false, path: s.path });
                 }
             }
             // Named by its git id (a partial clone of a git server): compared by that.
             let git_named = index.entries.get(&s.path).map(|e| Id::from_bytes(e.id)).filter(crate::objects::is_gitlink);
             if s.mode != Mode::Link && s.size >= crate::objects::STREAM_THRESHOLD && git_named.is_none() {
-                let id = Store::put_file_streaming(store, &root.join(&s.path)).with_context(|| format!("reading {}", s.path))?;
+                let id = Store::put_file_streaming(store, &crate::objects::disk_path(&root, &s.path)).with_context(|| format!("reading {}", s.path))?;
                 return Ok(File { size: s.size, mtime_ns: s.mtime_ns, mode: s.mode, id, hashed: true, absent: false, path: s.path });
             }
-            let data = read_content(&root.join(&s.path), s.mode).with_context(|| format!("reading {}", s.path))?;
+            let data = read_content(&crate::objects::disk_path(&root, &s.path), s.mode).with_context(|| format!("reading {}", s.path))?;
             let id = match &git_named {
                 Some(g) => crate::objects::blob_id_like(g, &data),
                 None => Store::hash(Kind::Blob, &data),
@@ -350,3 +451,4 @@ pub fn refresh(index: &mut Index, files: &[File]) -> bool {
     }
     updated
 }
+

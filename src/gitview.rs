@@ -32,7 +32,8 @@ const MARKER: &str = "gitview";
 const READ_ONLY_HOOK: &str = "#!/bin/sh\n\
 # This .git is a read-only view kept by copse (`copse git-view`).\n\
 # Branch and HEAD moves made with git are refused, so history can't fork.\n\
-if [ \"$1\" = prepared ] && [ -z \"$COPSE_GITVIEW_WRITE\" ]; then\n\
+# (An empty update, as git makes when it only fetches missing contents, is fine.)\n\
+if [ \"$1\" = prepared ] && [ -z \"$COPSE_GITVIEW_WRITE\" ] && grep -q . ; then\n\
   echo \"This .git folder is a read-only view kept by copse. Use copse to commit, switch branches or merge.\" >&2\n\
   exit 1\n\
 fi\n";
@@ -46,7 +47,7 @@ pub fn is_on(repo: &Repo) -> bool {
 }
 
 fn git_dir(repo: &Repo) -> PathBuf {
-    repo.root.join(".git")
+    crate::objects::disk_path(&repo.root, ".git")
 }
 
 /// Write one object in git's loose format, unless it's already there.
@@ -82,15 +83,107 @@ fn tips(repo: &Repo) -> Result<Vec<Id>> {
     Ok(t)
 }
 
+/// Write objects as one git pack (with its index) marked as coming from the promisor
+/// remote. That's how git stores a partial clone's objects, and it tells git that
+/// files they mention but that aren't here are on the remote, not lost.
+fn write_promisor_pack(git: &Path, objects: &[(u8, Vec<u8>)]) -> Result<()> {
+    use flate2::{write::ZlibEncoder, Compression, Crc};
+    use std::io::Write;
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let names = ["", "commit", "tree", "blob", "tag"];
+    let mut pack = Vec::new();
+    pack.extend_from_slice(b"PACK");
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    pack.extend_from_slice(&(objects.len() as u32).to_be_bytes());
+    let mut entries: Vec<(GitId, u32, u64)> = Vec::with_capacity(objects.len()); // id, crc, offset
+    for (kind, body) in objects {
+        let id = crate::gitwire::git_hash(names[*kind as usize], body);
+        let offset = pack.len() as u64;
+        let mut header = Vec::new();
+        let (mut size, mut byte) = (body.len() >> 4, ((*kind) << 4) | (body.len() & 0x0f) as u8);
+        while size > 0 {
+            header.push(byte | 0x80);
+            byte = (size & 0x7f) as u8;
+            size >>= 7;
+        }
+        header.push(byte);
+        let mut z = ZlibEncoder::new(header, Compression::fast());
+        z.write_all(body)?;
+        let entry = z.finish()?;
+        let mut crc = Crc::new();
+        crc.update(&entry);
+        pack.extend_from_slice(&entry);
+        entries.push((id, crc.sum(), offset));
+    }
+    let pack_sum: [u8; 20] = Sha1::digest(&pack).into();
+    pack.extend_from_slice(&pack_sum);
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.dedup_by(|a, b| a.0 == b.0);
+    let mut idx = Vec::new();
+    idx.extend_from_slice(&[0xff, b't', b'O', b'c']);
+    idx.extend_from_slice(&2u32.to_be_bytes());
+    let mut count = 0u32;
+    for first in 0..=255u8 {
+        count += entries.iter().filter(|e| e.0[0] == first).count() as u32;
+        idx.extend_from_slice(&count.to_be_bytes());
+    }
+    for e in &entries {
+        idx.extend_from_slice(&e.0);
+    }
+    for e in &entries {
+        idx.extend_from_slice(&e.1.to_be_bytes());
+    }
+    for e in &entries {
+        anyhow::ensure!(e.2 < 0x8000_0000, "the .git view's pack would be over 2 GB");
+        idx.extend_from_slice(&(e.2 as u32).to_be_bytes());
+    }
+    idx.extend_from_slice(&pack_sum);
+    let idx_sum: [u8; 20] = Sha1::digest(&idx).into();
+    idx.extend_from_slice(&idx_sum);
+    let dir = git.join("objects").join("pack");
+    fs::create_dir_all(&dir)?;
+    let name = format!("pack-{}", hex(&pack_sum));
+    fs::write(dir.join(format!("{name}.pack")), &pack)?;
+    fs::write(dir.join(format!("{name}.promisor")), b"")?;
+    fs::write(dir.join(format!("{name}.idx")), &idx)?; // last: it makes the pack visible
+    Ok(())
+}
+
 /// Bring the view up to date. Cheap when nothing changed.
 pub fn sync(repo: &Repo) -> Result<()> {
     if repo.is_bare() || !is_on(repo) {
         return Ok(());
     }
-    if repo.is_partial() {
-        bail!("the .git view needs every file's contents (this is a partial clone); `copse git-view off` to stop trying");
-    }
     let git = git_dir(repo);
+    {
+        // Keep the read-only hook current (older views had a stricter one).
+        use std::os::unix::fs::PermissionsExt;
+        let hook = git.join("hooks").join("reference-transaction");
+        if fs::read_to_string(&hook).ok().as_deref() != Some(READ_ONLY_HOOK) {
+            fs::create_dir_all(hook.parent().unwrap())?;
+            fs::write(&hook, READ_ONLY_HOOK)?;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    // A partial clone of a git server: git is told (as in its own partial clones)
+    // that origin has the contents copse hasn't downloaded, and fetches them itself.
+    // A partial clone of a copse repository can't be, since git can't fetch from it.
+    if repo.is_partial() {
+        let name = fs::read_to_string(repo.dir.join("promisor")).unwrap_or_default().trim().to_string();
+        let url = repo.remote_url(&name).ok().and_then(|u| crate::remote::git_url(&u).map(str::to_string));
+        let Some(url) = url else {
+            bail!("the .git view needs every file's contents, and this is a partial clone of a copse repository (git can't fetch from it); `copse git-view off` to stop trying");
+        };
+        fs::write(
+            git.join("config"),
+            format!(
+                "[core]\n\trepositoryformatversion = 1\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = false\n\
+                 [extensions]\n\tpartialClone = {name}\n[remote \"{name}\"]\n\turl = {url}\n\tpromisor = true\n\tpartialclonefilter = blob:none\n"
+            ),
+        )?;
+    }
     // A shallow clone: git is told where history stops (.git/shallow), by git id.
     let shallow = repo.shallow();
     if shallow.is_empty() {
@@ -121,8 +214,17 @@ pub fn sync(repo: &Repo) -> Result<()> {
             tr.translate_any(*t)?;
         }
         let objects = crate::transport::objects_to_send(repo, &new_tips, &done)?;
+        let partial = repo.is_partial();
+        let mut for_pack = Vec::new();
         for id in objects {
+            if crate::objects::is_gitlink(&id) && !repo.store.contains(&id) {
+                continue; // not downloaded (partial clone): git fetches it from origin when it needs it
+            }
             let (kind, body) = tr.git_object(&id)?;
+            if partial {
+                for_pack.push((kind, body));
+                continue;
+            }
             let name = match kind {
                 1 => "commit",
                 2 => "tree",
@@ -131,6 +233,7 @@ pub fn sync(repo: &Repo) -> Result<()> {
             };
             write_object(&git, name, &body)?;
         }
+        write_promisor_pack(&git, &for_pack)?;
         tr.map.save()?;
         let text: String = tips.iter().map(|t| format!("{}\n", t.to_hex())).collect();
         crate::repo::write_atomic(&done_path, text.as_bytes())?;
@@ -197,6 +300,8 @@ fn write_index(repo: &Repo, git: &Path, map: &GitMap) -> Result<()> {
         let id = Id::from_bytes(e.id);
         let sha: GitId = match e.mode {
             Mode::Submodule => crate::objects::gitlink_sha(&id),
+            // A file named by its git id (partial clone of a git server).
+            _ if crate::objects::is_gitlink(&id) => crate::objects::gitlink_sha(&id),
             _ => match map.git(&id) {
                 Some(s) => s,
                 None if head_files.get(path).map(|(_, i)| *i) == Some(id) => continue, // shouldn't happen
@@ -210,7 +315,7 @@ fn write_index(repo: &Repo, git: &Path, map: &GitMap) -> Result<()> {
                 }
             },
         };
-        let md = fs::symlink_metadata(repo.root.join(path)).ok();
+        let md = fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)).ok();
         // The file's real stat goes in only if copse's own index vouches that the
         // file still holds this entry's content (same size, mtime and mode as when
         // copse recorded it). Otherwise git would see a stat matching the file on

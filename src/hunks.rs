@@ -144,8 +144,17 @@ pub fn changed_lines(hunks: &[Hunk]) -> usize {
 /// `hunks`): an untaken removal keeps the old line, an untaken addition leaves the
 /// new one out.
 pub fn apply(old: &str, new: &str, take: &[bool]) -> String {
+    apply_mapped(old, new, take).0
+}
+
+/// `apply`, plus where each old line landed in the result (byte range), for the
+/// old lines that were kept.
+fn apply_mapped(old: &str, new: &str, take: &[bool]) -> (String, Vec<Option<(usize, usize)>>) {
     let diff = TextDiff::from_lines(old, new);
-    let (olds, news) = (diff.old_slices(), diff.new_slices());
+    // The lines the diff numbered (each with its newline, as from_lines splits them).
+    let olds: Vec<&str> = old.split_inclusive('\n').collect();
+    let news: Vec<&str> = new.split_inclusive('\n').collect();
+    let mut at: Vec<Option<(usize, usize)>> = vec![None; olds.len()];
     let mut out = String::with_capacity(new.len().max(old.len()));
     // A kept last line without a newline, followed by an added line, gets one
     // (otherwise the two would run together).
@@ -158,12 +167,16 @@ pub fn apply(old: &str, new: &str, take: &[bool]) -> String {
     let mut k = 0;
     for op in diff.ops() {
         if op.tag() == DiffTag::Equal {
-            olds[op.old_range()].iter().for_each(|l| push(&mut out, l));
+            for n in op.old_range() {
+                push(&mut out, olds[n]);
+                at[n] = Some((out.len() - olds[n].len(), out.len()));
+            }
             continue;
         }
-        for l in &olds[op.old_range()] {
+        for n in op.old_range() {
             if take.get(k) != Some(&true) {
-                push(&mut out, l);
+                push(&mut out, olds[n]);
+                at[n] = Some((out.len() - olds[n].len(), out.len()));
             }
             k += 1;
         }
@@ -173,6 +186,51 @@ pub fn apply(old: &str, new: &str, take: &[bool]) -> String {
             }
             k += 1;
         }
+    }
+    (out, at)
+}
+
+/// One hunk the user rewrote in the editor (`e`): its lines in the old file are
+/// replaced by `text`.
+#[derive(Clone, Debug)]
+pub struct Edit {
+    pub old: std::ops::Range<usize>,
+    pub text: String,
+}
+
+impl Hunk {
+    /// The old file's lines this hunk covers (its context and removed lines).
+    fn old_range(&self) -> std::ops::Range<usize> {
+        let olds: Vec<usize> = self.lines.iter().filter(|l| l.mark != '+').map(|l| l.old).collect();
+        match (olds.first(), olds.last()) {
+            (Some(a), Some(b)) => *a..*b + 1,
+            _ => self.lines.first().map_or(0..0, |l| l.old..l.old),
+        }
+    }
+}
+
+/// `apply`, then the edited hunks' old lines replaced by what the user wrote.
+/// (Edited hunks' own changed lines must be untaken, so their old lines are all kept.)
+pub fn apply_with_edits(old: &str, new: &str, take: &[bool], edits: &[Edit]) -> String {
+    let (mut out, at) = apply_mapped(old, new, take);
+    let mut edits: Vec<&Edit> = edits.iter().collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.old.start));
+    for e in edits {
+        let span = (e.old.start..e.old.end).filter_map(|n| at.get(n).copied().flatten());
+        let (mut from, mut to) = (None, None);
+        for (a, b) in span {
+            from = Some(from.map_or(a, |f: usize| f.min(a)));
+            to = Some(to.map_or(b, |t: usize| t.max(b)));
+        }
+        let (from, to) = match (from, to) {
+            (Some(f), Some(t)) => (f, t),
+            // An empty old range (adding to an empty file): insert where it would go.
+            _ => {
+                let pos = (0..e.old.start).rev().find_map(|n| at.get(n).copied().flatten().map(|(_, b)| b)).unwrap_or(0);
+                (pos, pos)
+            }
+        };
+        out.replace_range(from..to, &e.text);
     }
     out
 }
@@ -216,6 +274,8 @@ pub enum Question<'a> {
 
 pub enum Answer {
     Key(char),
+    /// The hunk rewritten in the editor: this text replaces its old lines.
+    Edited(String),
     /// Which changed lines to take: for a File question, all of the file's; for a
     /// Hunk question, the hunk's own.
     Take(Vec<bool>),
@@ -235,15 +295,18 @@ fn ask(input: &mut dyn BufRead, question: &str) -> char {
     }
 }
 
-/// Edit a hunk in the editor, as git's `e` does: delete `+` lines you don't want,
-/// turn `-` lines you want to keep into context (a space). Returns the pick of the
-/// hunk's changed lines.
-pub fn edit_hunk(repo: &Repo, path: &str, h: &Hunk) -> Result<Vec<bool>> {
+/// Edit a hunk in the editor, as git's `e` does. The context and `-` lines must
+/// stay as they were (they're what the file has now); the `+` side can be anything:
+/// change, add or delete `+` lines, or turn a `-` into a space to keep that line.
+/// Returns the text that replaces the hunk's old lines, or None if the user
+/// deleted everything (leave the change out).
+pub fn edit_hunk(repo: &Repo, path: &str, h: &Hunk) -> Result<Option<String>> {
     let file = repo.wt.join("HUNK_EDIT.diff");
     let mut text = format!(
-        "# Editing a change in {path}. To leave out an added (+) line, delete it.\n\
-         # To keep a removed (-) line, change its '-' to a space. Lines starting\n\
-         # with # are ignored. Delete everything to leave the whole change out.\n"
+        "# Editing a change in {path}. Change, add or delete + lines as you like.\n\
+         # To keep a removed (-) line, change its '-' to a space. Context and -\n\
+         # lines must otherwise stay as they are. Lines starting with # are\n\
+         # ignored. Delete everything to leave the whole change out.\n"
     );
     text += &h.text();
     std::fs::write(&file, &text)?;
@@ -251,40 +314,31 @@ pub fn edit_hunk(repo: &Repo, path: &str, h: &Hunk) -> Result<Vec<bool>> {
     let _ = std::fs::remove_file(&file);
     let edited = edited?;
     let lines: Vec<&str> = edited.lines().filter(|l| !l.starts_with('#') && !l.starts_with("@@")).collect();
-    let mut take = vec![false; h.changes.len()];
-    let mut at = 0; // position in the edited lines
-    for l in &h.lines {
-        let next = lines.get(at).copied();
-        let matches = |mark: char| next.is_some_and(|n| n.strip_prefix(mark) == Some(l.text.as_str()) || (n.is_empty() && mark == ' ' && l.text.is_empty()));
-        match l.mark {
+    if lines.iter().all(|l| l.trim().is_empty()) {
+        return Ok(None);
+    }
+    let (mut old_side, mut new_side): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+    for l in &lines {
+        // An editor may strip a context line's lone space, leaving it empty.
+        let (mark, rest) = match l.chars().next() {
+            None => (' ', ""),
+            Some(c) => (c, &l[c.len_utf8()..]),
+        };
+        match mark {
             ' ' => {
-                if !matches(' ') {
-                    bail!("the context line {:?} was changed; only delete + lines or turn - into a space", l.text);
-                }
-                at += 1;
+                old_side.push(rest);
+                new_side.push(rest);
             }
-            '+' => {
-                if matches('+') {
-                    take[l.change.unwrap() - h.changes.start] = true;
-                    at += 1;
-                }
-            }
-            _ => {
-                if matches('-') {
-                    take[l.change.unwrap() - h.changes.start] = true;
-                    at += 1;
-                } else if matches(' ') {
-                    at += 1;
-                } else {
-                    bail!("the removed line {:?} is gone; to keep it, change its '-' to a space instead", l.text);
-                }
-            }
+            '-' => old_side.push(rest),
+            '+' => new_side.push(rest),
+            _ => bail!("the line {l:?} doesn't start with a space, + or -"),
         }
     }
-    if at < lines.len() && lines[at..].iter().any(|l| !l.trim().is_empty()) {
-        bail!("the edited change has lines that weren't in it; only delete + lines or turn - into a space");
+    let want: Vec<&str> = h.lines.iter().filter(|l| l.mark != '+').map(|l| l.text.as_str()).collect();
+    if old_side != want {
+        bail!("the context and - lines have to stay as they were (they're what the file has now); edit the + lines, or turn a - into a space to keep that line");
     }
-    Ok(take)
+    Ok(Some(new_side.iter().map(|l| format!("{l}\n")).collect()))
 }
 
 /// Answers typed at the terminal: `copse commit -p`.
@@ -298,7 +352,8 @@ pub fn ask_terminal<'a>(repo: &'a Repo, input: &'a mut dyn BufRead) -> impl FnMu
                 let split = if hunk.can_split() { " [s]plit" } else { "" };
                 match ask(input, &format!("Commit this change? [y]es [n]o [a]ll the rest of this file [d]one with this file{split} [e]dit [q]uit:")) {
                     'e' => match edit_hunk(repo, path, hunk) {
-                        Ok(take) => break Answer::Take(take),
+                        Ok(Some(text)) => break Answer::Edited(text),
+                        Ok(None) => break Answer::Key('n'),
                         Err(e) => println!("{} {e:#}", paint("31", "Not used:")),
                     },
                     's' if !hunk.can_split() => println!("{}", paint("2", "This change can't be split any smaller.")),
@@ -374,7 +429,7 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
     let mut chosen = BTreeMap::new();
     let key = |a: Answer| match a {
         Answer::Key(c) => c,
-        Answer::Take(_) => '?',
+        Answer::Take(_) | Answer::Edited(_) => '?',
     };
     'files: for (path, kind) in paths {
         let mut whole = |prompt: String| -> Result<char> { Ok(key(answer(&Question::Whole { path, prompt })?)) };
@@ -426,9 +481,11 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                     continue;
                 }
                 let mut take = vec![false; changed_lines(&hs)];
+                let mut edits: Vec<Edit> = Vec::new();
                 let mut quit = false;
                 match answer(&Question::File { path, hunks: &hs })? {
                     Answer::Take(t) => take = t,
+                    Answer::Edited(_) => {}
                     Answer::Key(_) => {
                         // Hunk by hunk; split hunks go to the front of the queue.
                         let mut queue: VecDeque<Hunk> = hs.iter().cloned().collect();
@@ -442,6 +499,10 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                             n += 1;
                             match answer(&Question::Hunk { path, hunk: &h, n, of })? {
                                 Answer::Take(t) => take[h.changes.clone()].copy_from_slice(&t),
+                                Answer::Edited(text) => {
+                                    take[h.changes.clone()].iter_mut().for_each(|x| *x = false);
+                                    edits.push(Edit { old: h.old_range(), text });
+                                }
                                 Answer::Key('y') => take[h.changes.clone()].iter_mut().for_each(|x| *x = true),
                                 Answer::Key('a') => {
                                     take[h.changes.clone()].iter_mut().for_each(|x| *x = true);
@@ -465,7 +526,13 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                         }
                     }
                 }
-                if take.iter().any(|t| *t) {
+                if !edits.is_empty() {
+                    let content = apply_with_edits(old_t, new_t, &take, &edits);
+                    if content != old_t {
+                        let id = repo.store.put(Kind::Blob, content.as_bytes())?;
+                        chosen.insert(path.clone(), Some((if f.mode == old_mode { old_mode } else { f.mode }, id)));
+                    }
+                } else if take.iter().any(|t| *t) {
                     chosen.insert(path.clone(), Some(build(repo, old_t, new_t, &take, old_mode, f)?));
                 }
                 if quit {
@@ -535,6 +602,26 @@ mod tests {
         let mut take = vec![false; changed_lines(&hs)];
         take[parts[1].changes.clone()].iter_mut().for_each(|t| *t = true);
         assert_eq!(apply(&old, &new, &take), old.replace("8\n", "eight\n"));
+    }
+
+    #[test]
+    fn an_edited_hunk_replaces_its_lines() {
+        let line = |i: u32| match i {
+            3 => "three".to_string(),
+            25 => "twenty-five".to_string(),
+            i => i.to_string(),
+        };
+        let old: String = (1..=30).map(|i| format!("{i}\n")).collect();
+        let new: String = (1..=30).map(|i| format!("{}\n", line(i))).collect();
+        let hs = hunks(&old, &new);
+        assert_eq!(hs.len(), 2);
+        // Take the first change as it is, and write the second one by hand.
+        let mut take = vec![false; changed_lines(&hs)];
+        take[hs[0].changes.clone()].iter_mut().for_each(|t| *t = true);
+        let replacement: String = hs[1].lines.iter().map(|l| if l.text == "twenty-five" { "XXV\n".to_string() } else if l.mark == '-' { String::new() } else { format!("{}\n", l.text) }).collect();
+        let out = super::apply_with_edits(&old, &new, &take, &[super::Edit { old: hs[1].old_range(), text: replacement }]);
+        let want: String = (1..=30).map(|i| match i { 3 => "three\n".to_string(), 25 => "XXV\n".to_string(), i => format!("{i}\n") }).collect();
+        assert_eq!(out, want);
     }
 
     #[test]

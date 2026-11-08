@@ -42,7 +42,7 @@ pub enum Head {
 
 impl Repo {
     pub fn init(root: &Path) -> Result<Repo> {
-        let dir = root.join(DIR);
+        let dir = crate::objects::disk_path(&root, DIR);
         if dir.exists() {
             bail!("already a copse repository: {}", dir.display());
         }
@@ -99,7 +99,7 @@ impl Repo {
     }
 
     fn open(root: PathBuf) -> Repo {
-        let marker = root.join(DIR);
+        let marker = crate::objects::disk_path(&root, DIR);
         if marker.is_file() {
             // An extra worktree: its state folder, and from there the shared one.
             if let Some(wt) = fs::read_to_string(&marker).ok().and_then(|t| t.trim().strip_prefix(WORKTREE_MARK.trim()).map(|p| PathBuf::from(p.trim()))) {

@@ -30,6 +30,29 @@ pub enum Favor {
     Theirs,
 }
 
+/// How whitespace counts when lines are compared (`-X ignore-space-change` and friends).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Space {
+    #[default]
+    Exact,
+    /// Runs of whitespace count as one space, and trailing whitespace doesn't count.
+    Change,
+    /// No whitespace counts at all.
+    All,
+    /// Whitespace at the end of a line doesn't count.
+    AtEol,
+    /// A carriage return at the end of a line doesn't count.
+    CrAtEol,
+}
+
+/// Which diff algorithm lines up the lines (`-X diff-algorithm=`, `-X patience`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Diff {
+    #[default]
+    Myers,
+    Patience,
+}
+
 /// The `-X` options in force for this command. Merges happen deep inside merge,
 /// pull, rebase, cherry-pick, revert and stash, so they're set once per process
 /// (and saved with a paused rebase, so `--continue` keeps them).
@@ -37,9 +60,14 @@ pub enum Favor {
 pub struct Options {
     pub favor: Favor,
     pub no_renames: bool,
+    /// Rename similarity in percent (git's default is 50).
+    pub rename_threshold: Option<u32>,
+    pub space: Space,
+    pub diff: Diff,
 }
 
-static OPTIONS: std::sync::Mutex<Options> = std::sync::Mutex::new(Options { favor: Favor::None, no_renames: false });
+static OPTIONS: std::sync::Mutex<Options> =
+    std::sync::Mutex::new(Options { favor: Favor::None, no_renames: false, rename_threshold: None, space: Space::Exact, diff: Diff::Myers });
 
 pub fn set_options(o: Options) {
     *OPTIONS.lock().unwrap() = o;
@@ -49,7 +77,18 @@ pub fn options() -> Options {
     *OPTIONS.lock().unwrap()
 }
 
-/// Parse `-X` values as git spells them: ours, theirs, no-renames, find-renames.
+/// A percentage as git writes it for renames: "70", "70%", or a fraction ".7" / "0.7".
+fn parse_percent(v: &str) -> Option<u32> {
+    let v = v.trim_end_matches('%');
+    if let Some(frac) = v.strip_prefix("0.").or_else(|| v.strip_prefix('.')) {
+        let digits: String = frac.chars().take(2).collect();
+        let n: u32 = format!("{digits:0<2}").parse().ok()?;
+        return Some(n);
+    }
+    v.parse().ok().filter(|n| *n <= 100)
+}
+
+/// Parse `-X` values as git spells them.
 pub fn parse_options(xs: &[String]) -> Result<Options> {
     let mut o = Options::default();
     for x in xs {
@@ -57,8 +96,27 @@ pub fn parse_options(xs: &[String]) -> Result<Options> {
             "ours" => o.favor = Favor::Ours,
             "theirs" => o.favor = Favor::Theirs,
             "no-renames" => o.no_renames = true,
-            x if x == "find-renames" || x.starts_with("find-renames=") || x.starts_with("rename-threshold=") => o.no_renames = false,
-            other => bail!("-X {other} isn't supported; copse knows -X ours, -X theirs, -X no-renames and -X find-renames"),
+            "find-renames" => o.no_renames = false,
+            x if x.starts_with("find-renames=") || x.starts_with("rename-threshold=") => {
+                let v = x.split_once('=').unwrap().1;
+                o.no_renames = false;
+                o.rename_threshold = Some(parse_percent(v).with_context(|| format!("-X {x}: give a percentage, like 70 or 70%"))?);
+            }
+            "ignore-space-change" => o.space = Space::Change,
+            "ignore-all-space" => o.space = Space::All,
+            "ignore-space-at-eol" => o.space = Space::AtEol,
+            "ignore-cr-at-eol" => o.space = Space::CrAtEol,
+            "patience" | "diff-algorithm=patience" | "diff-algorithm=histogram" => o.diff = Diff::Patience,
+            "diff-algorithm=myers" | "diff-algorithm=minimal" | "diff-algorithm=default" => o.diff = Diff::Myers,
+            // copse never converts line endings, so there's nothing to renormalize.
+            "renormalize" | "no-renormalize" => {}
+            x if x == "subtree" || x.starts_with("subtree=") => {
+                bail!("-X subtree isn't supported (it merges a project kept in a subfolder); merge into that folder's own repository instead")
+            }
+            other => bail!(
+                "-X {other} isn't known; copse has ours, theirs, ignore-space-change, ignore-all-space, ignore-space-at-eol, \
+                 ignore-cr-at-eol, patience, diff-algorithm=, find-renames[=N], rename-threshold=N, no-renames and renormalize"
+            ),
         }
     }
     Ok(o)
@@ -67,14 +125,27 @@ pub fn parse_options(xs: &[String]) -> Result<Options> {
 impl Options {
     /// How a paused rebase remembers them: "ours", "theirs no-renames", ...
     pub fn to_words(self) -> String {
-        let mut w = Vec::new();
+        let mut w: Vec<String> = Vec::new();
         match self.favor {
-            Favor::Ours => w.push("ours"),
-            Favor::Theirs => w.push("theirs"),
+            Favor::Ours => w.push("ours".into()),
+            Favor::Theirs => w.push("theirs".into()),
             Favor::None => {}
         }
         if self.no_renames {
-            w.push("no-renames");
+            w.push("no-renames".into());
+        }
+        if let Some(t) = self.rename_threshold {
+            w.push(format!("find-renames={t}"));
+        }
+        match self.space {
+            Space::Change => w.push("ignore-space-change".into()),
+            Space::All => w.push("ignore-all-space".into()),
+            Space::AtEol => w.push("ignore-space-at-eol".into()),
+            Space::CrAtEol => w.push("ignore-cr-at-eol".into()),
+            Space::Exact => {}
+        }
+        if self.diff == Diff::Patience {
+            w.push("patience".into());
         }
         w.join(" ")
     }
@@ -83,24 +154,59 @@ impl Options {
         let xs: Vec<String> = words.split_whitespace().map(String::from).collect();
         parse_options(&xs).unwrap_or_default()
     }
+
+    /// The text a line is compared by, under these whitespace rules.
+    fn key<'a>(&self, line: &'a str) -> std::borrow::Cow<'a, str> {
+        use std::borrow::Cow;
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        match self.space {
+            Space::Exact => Cow::Borrowed(line),
+            Space::All => Cow::Owned(body.chars().filter(|c| !c.is_whitespace()).collect()),
+            Space::AtEol => Cow::Borrowed(body.trim_end()),
+            Space::CrAtEol => Cow::Borrowed(body.strip_suffix('\r').unwrap_or(body)),
+            Space::Change => {
+                let mut out = String::with_capacity(body.len());
+                let mut space = false;
+                for c in body.trim_end().chars() {
+                    if c.is_whitespace() {
+                        space = true;
+                    } else {
+                        if space && !out.is_empty() {
+                            out.push(' ');
+                        }
+                        space = false;
+                        out.push(c);
+                    }
+                }
+                if body.trim_end().starts_with(char::is_whitespace) {
+                    out.insert(0, ' ');
+                }
+                Cow::Owned(out)
+            }
+        }
+    }
 }
 
-/// `-s`: the merge strategy. Only the default and `ours` exist in copse.
+/// `-s`: the merge strategy.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Strategy {
-    /// The normal three-way merge (git's ort / recursive).
+    /// The normal three-way merge (git's ort, recursive and resolve).
     #[default]
     Normal,
     /// Record a merge, but keep the current branch's files exactly as they are.
     Ours,
+    /// Merge several branches at once into one commit; stops if any conflict.
+    Octopus,
 }
 
 pub fn parse_strategy(s: Option<&str>) -> Result<Strategy> {
     Ok(match s {
-        None | Some("ort") | Some("recursive") => Strategy::Normal,
+        None | Some("ort") | Some("recursive") | Some("resolve") => Strategy::Normal,
         Some("ours") => Strategy::Ours,
+        Some("octopus") => Strategy::Octopus,
         Some("theirs") => bail!("there's no -s theirs (git has none either); -X theirs takes their side wherever both changed the same lines"),
-        Some(other) => bail!("-s {other} isn't supported; copse has the normal merge (ort, recursive) and -s ours"),
+        Some("subtree") => bail!("-s subtree isn't supported (it merges a project kept in a subfolder)"),
+        Some(other) => bail!("-s {other} isn't a merge strategy; copse has ort (the default; also recursive, resolve), ours and octopus"),
     })
 }
 
@@ -179,7 +285,7 @@ pub fn with_markers(repo: &Repo, paths: &[String]) -> Vec<String> {
     paths
         .iter()
         .filter(|p| {
-            fs::read_to_string(repo.root.join(p))
+            fs::read_to_string(crate::objects::disk_path(&repo.root, p))
                 .map(|text| text.lines().any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> ")))
                 .unwrap_or(false)
         })
@@ -276,9 +382,10 @@ struct Hunk {
     s1: usize,
 }
 
-fn hunks(base: &[&str], side: &[&str]) -> Vec<Hunk> {
+/// Where `side` differs from `base`, comparing lines by `key` (see `Options::key`).
+fn hunks<K: std::hash::Hash + Eq + Ord>(base: &[K], side: &[K], algorithm: Algorithm) -> Vec<Hunk> {
     let mut out: Vec<Hunk> = Vec::new();
-    for op in capture_diff_slices(Algorithm::Myers, base, side) {
+    for op in capture_diff_slices(algorithm, base, side) {
         let (tag, old, new) = op.as_tag_tuple();
         if tag == DiffTag::Equal {
             continue;
@@ -323,10 +430,19 @@ pub fn merge_text(base: &str, ours: &str, theirs: &str, ours_label: &str, theirs
 
 /// `merge_text`, with conflicting edits settled for one side (-X ours / theirs).
 pub fn merge_text_favoring(base: &str, ours: &str, theirs: &str, ours_label: &str, theirs_label: &str, favor: Favor) -> (String, usize) {
+    let opts = options();
     let b: Vec<&str> = base.split_inclusive('\n').collect();
     let o: Vec<&str> = ours.split_inclusive('\n').collect();
     let t: Vec<&str> = theirs.split_inclusive('\n').collect();
-    let (ho, ht) = (hunks(&b, &o), hunks(&b, &t));
+    // Lines are compared by their key: themselves, or with whitespace set aside
+    // (-X ignore-space-change and friends), so whitespace-only edits aren't changes.
+    let keys = |lines: &[&'_ str]| -> Vec<String> { lines.iter().map(|l| opts.key(l).into_owned()).collect() };
+    let (bk, ok, tk) = (keys(&b), keys(&o), keys(&t));
+    let algorithm = if opts.diff == Diff::Patience { Algorithm::Patience } else { Algorithm::Myers };
+    let (ho, ht) = (hunks(&bk, &ok, algorithm), hunks(&bk, &tk, algorithm));
+    // Where neither side changed anything (by key), ours is written: the same as the
+    // base normally, and ours where we changed only whitespace (as git does).
+    let ours_at = |from: usize, to: usize, off: isize| &o[(from as isize + off) as usize..(to as isize + off) as usize];
 
     let mut out = String::with_capacity(ours.len().max(theirs.len()));
     let mut conflicts = 0;
@@ -360,14 +476,14 @@ pub fn merge_text_favoring(base: &str, ours: &str, theirs: &str, ours_label: &st
             }
         }
 
-        push_lines(&mut out, &b[pos..start]);
+        push_lines(&mut out, ours_at(pos, start, off_o));
         let (o0, o1) = side_range(&ho[i0..i], start, end, off_o);
         let (t0, t1) = side_range(&ht[j0..j], start, end, off_t);
         let (os, ts) = (&o[o0..o1], &t[t0..t1]);
 
         if i == i0 {
             push_lines(&mut out, ts); // only theirs changed
-        } else if j == j0 || os == ts {
+        } else if j == j0 || ok[o0..o1] == tk[t0..t1] {
             push_lines(&mut out, os); // only ours changed, or both made the same change
         } else if favor == Favor::Ours {
             push_lines(&mut out, os); // -X ours
@@ -390,7 +506,7 @@ pub fn merge_text_favoring(base: &str, ours: &str, theirs: &str, ours_label: &st
         }
         pos = end;
     }
-    push_lines(&mut out, &b[pos..]);
+    push_lines(&mut out, ours_at(pos, b.len(), off_o));
     (out, conflicts)
 }
 
@@ -405,6 +521,74 @@ pub enum FastForward {
     Never,
     /// Only fast-forward; refuse if the branches have diverged.
     Only,
+}
+
+/// `copse merge A B C...`: several branches into one merge commit (git's octopus).
+/// Each is merged in turn onto the result so far; if any of them conflicts,
+/// nothing is changed and copse says to merge them one at a time.
+pub fn merge_octopus(targets: &[String], message: Option<&str>) -> Result<()> {
+    let repo = Repo::find()?;
+    if MergeState::load(&repo)?.is_some() {
+        bail!("a merge is already in progress: fix the conflicts and run `copse commit`, or run `copse merge --abort`");
+    }
+    if let Some(r) = crate::rebase::RebaseState::load(&repo)? {
+        bail!("{}", r.busy());
+    }
+    let mut index = Index::load(&repo.wt)?;
+    let ours = repo.head_commit()?.context("there are no commits to merge into yet")?;
+    let files = snapshot(&repo.root, &index, None)?;
+    let ch = changes(&index, &files);
+    if !ch.is_empty() {
+        print_changes(&ch);
+        bail!("commit or discard your {} change(s) before merging", ch.len());
+    }
+    let ours_label = head_label(&repo)?;
+    let mut merged = flatten(&repo.store, &repo.read_commit(&ours)?.tree)?;
+    let mut parents = vec![ours];
+    let mut names = Vec::new();
+    for t in targets {
+        let theirs = repo.resolve(t)?;
+        if parents.iter().any(|p| is_ancestor(&repo, theirs, *p).unwrap_or(false)) {
+            println!("Already up to date with {t}.");
+            continue;
+        }
+        let base = merge_base(&repo, ours, theirs)?;
+        let base_tree = match base {
+            Some(b) => flatten(&repo.store, &repo.read_commit(&b)?.tree)?,
+            None => BTreeMap::new(),
+        };
+        let theirs_tree = flatten(&repo.store, &repo.read_commit(&theirs)?.tree)?;
+        let (result, conflicts) = merge_trees(&repo, &base_tree, &merged, &theirs_tree, &ours_label, t)?;
+        if !conflicts.is_empty() {
+            for (path, reason) in &conflicts {
+                println!("  {} {path}  {}", paint("31", "C"), paint("2", reason));
+            }
+            bail!("merging {t} conflicts, and a merge of several branches at once can't stop for conflicts (git's can't either). Nothing was changed; merge them one at a time");
+        }
+        merged = result;
+        parents.push(theirs);
+        names.push(t.clone());
+    }
+    match names.len() {
+        0 => {
+            println!("Already up to date.");
+            return Ok(());
+        }
+        1 => return merge_with(Some(&names[0]), false, FastForward::Allow, message, Strategy::Normal),
+        _ => {}
+    }
+    let (written, removed) = apply_tree(&repo, &mut index, &files, &merged, &[])?;
+    let tree = write_tree(&repo.store, merged.iter().map(|(p, (m, id))| (p.as_str(), *m, *id)))?;
+    let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    let default = format!("Merge branches {} and {} into {ours_label}", quoted[..quoted.len() - 1].join(", "), quoted[quoted.len() - 1]);
+    let text = message.map(str::trim).filter(|m| !m.is_empty()).map_or(default, str::to_string);
+    let id = crate::signing::store(&repo, Commit::new(tree, parents, text))?;
+    repo.advance_head(&id)?;
+    index.save(&repo.wt)?;
+    println!("Merged {} into {ours_label} [{}]", names.join(", "), paint("33", &short(&id)));
+    println!("  {written} file(s) written, {removed} removed");
+    crate::hooks::notify(&repo, "post-merge", &["0"]);
+    Ok(())
 }
 
 pub fn merge_with(target: Option<&str>, abort: bool, ff: FastForward, message: Option<&str>, strategy: Strategy) -> Result<()> {
@@ -463,7 +647,7 @@ pub fn merge_with(target: Option<&str>, abort: bool, ff: FastForward, message: O
     let (merged, conflicts) = match strategy {
         // -s ours: a merge commit whose files are exactly the current branch's.
         Strategy::Ours => (ours_tree.clone(), vec![]),
-        Strategy::Normal => merge_trees(&repo, &base_tree, &ours_tree, &theirs_tree, &ours_label, target)?,
+        Strategy::Normal | Strategy::Octopus => merge_trees(&repo, &base_tree, &ours_tree, &theirs_tree, &ours_label, target)?,
     };
 
     let added: Vec<String> = merged.keys().filter(|p| !ours_tree.contains_key(*p)).cloned().collect();
@@ -516,8 +700,9 @@ fn follow_renames(repo: &Repo, base: &Files, ours: &Files, theirs: &Files) -> (F
     if base.is_empty() || options().no_renames {
         return (base, ours, theirs, conflicts, doubles);
     }
-    let ours_renames = crate::renames::detect(repo, &base, &ours);
-    let theirs_renames = crate::renames::detect(repo, &base, &theirs);
+    let threshold = options().rename_threshold.unwrap_or(crate::renames::THRESHOLD);
+    let ours_renames = crate::renames::detect_with(repo, &base, &ours, threshold);
+    let theirs_renames = crate::renames::detect_with(repo, &base, &theirs, threshold);
     let ours_from: BTreeMap<&str, &str> = ours_renames.iter().map(|r| (r.from.as_str(), r.to.as_str())).collect();
     let theirs_from: BTreeMap<&str, &str> = theirs_renames.iter().map(|r| (r.from.as_str(), r.to.as_str())).collect();
     let mut moves: Vec<(String, String, bool)> = Vec::new(); // (from, to, renamed by theirs)

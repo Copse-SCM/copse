@@ -22,6 +22,70 @@ pub fn user_agent() -> String {
     format!("git/2.0 (copse {})", crate::VERSION)
 }
 
+/// An HTTP client set up the way copse uses it: sign-in is handled by `Http`,
+/// status codes come back as replies (not errors), proxies come from the
+/// environment, and dumb servers can have many requests open at once.
+pub fn new_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .user_agent(user_agent())
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .max_redirects(5)
+        .max_idle_connections_per_host(16)
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+/// A server's reply: status, content type (without parameters), the address it
+/// finally came from (after redirects), and the body to read.
+pub struct Reply {
+    pub status: u16,
+    pub content_type: String,
+    pub url: String,
+    body: ureq::Body,
+}
+
+impl Reply {
+    /// The body as a stream (no size limit: packs can be large).
+    pub fn reader(self) -> Box<dyn Read + Send> {
+        Box::new(self.body.into_reader())
+    }
+
+    pub fn bytes(self, limit: u64) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.reader().take(limit).read_to_end(&mut out)?;
+        Ok(out)
+    }
+}
+
+/// Make one request. GET has no body; POST and PUT send `body` (empty if None).
+pub fn request(agent: &ureq::Agent, method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<Reply> {
+    let result = match method {
+        "GET" => {
+            let mut req = agent.get(url);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            req.call()
+        }
+        "POST" | "PUT" => {
+            let mut req = if method == "POST" { agent.post(url) } else { agent.put(url) };
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            req.send(body.unwrap_or_default())
+        }
+        other => bail!("internal error: unsupported HTTP method {other}"),
+    };
+    let resp = result.map_err(|e| anyhow!("couldn't reach {}: {e}", redact(url)))?;
+    use ureq::ResponseExt;
+    let status = resp.status().as_u16();
+    let final_url = resp.get_uri().to_string();
+    let content_type = resp.body().mime_type().unwrap_or("").to_string();
+    let (_, body) = resp.into_parts();
+    Ok(Reply { status, content_type, url: final_url, body })
+}
+
 struct Credential {
     username: String,
     password: String,
@@ -40,13 +104,7 @@ pub struct Http {
 
 impl Http {
     pub fn new(url: &str, service: &'static str) -> Http {
-        let agent = ureq::AgentBuilder::new()
-            .user_agent(&user_agent())
-            .timeout_connect(Duration::from_secs(30))
-            .redirects(5)
-            .max_idle_connections_per_host(16) // dumb servers: many small requests at once
-            .try_proxy_from_env(true)
-            .build();
+        let agent = new_agent();
         let (base, auth) = split_userinfo(url.trim_end_matches('/'));
         Http { base, service, agent, auth }
     }
@@ -54,26 +112,20 @@ impl Http {
     /// The server's branches and capabilities.
     pub fn discover(&mut self) -> Result<(Vec<(String, GitId)>, HashSet<String>)> {
         let url = format!("{}/info/refs?service=git-{}", self.base, self.service);
-        let resp = self.send(|agent, auth| {
-            let mut req = agent.get(&url);
-            if let Some(a) = auth {
-                req = req.set("Authorization", a);
-            }
-            req.call()
-        })?;
+        let resp = self.send("GET", &url, &[], None)?;
         // If the repository moved (renamed, transferred), keep using its new address.
-        if let Some((base, _)) = resp.get_url().split_once("/info/refs") {
+        if let Some((base, _)) = resp.url.split_once("/info/refs") {
             self.base = split_userinfo(base).0;
         }
-        if resp.content_type() != format!("application/x-git-{}-advertisement", self.service) {
+        let content_type = resp.content_type.clone();
+        if content_type != format!("application/x-git-{}-advertisement", self.service) {
             // An older "dumb" server (plain files, e.g. cgit): its branch list is plain text.
             // (Plain web servers label it text/plain or application/octet-stream.)
-            if self.service == "receive-pack" && matches!(resp.content_type(), "text/plain" | "application/octet-stream" | "") {
+            if self.service == "receive-pack" && matches!(content_type.as_str(), "text/plain" | "application/octet-stream" | "") {
                 bail!("{} only serves plain files (git's read-only \"dumb\" protocol), so it can't take pushes; push over SSH, or to a server that speaks git's smart protocol", redact(&self.base));
             }
-            if self.service == "upload-pack" && matches!(resp.content_type(), "text/plain" | "application/octet-stream" | "") {
-                let mut body = String::new();
-                resp.into_reader().take(64 << 20).read_to_string(&mut body)?;
+            if self.service == "upload-pack" && matches!(content_type.as_str(), "text/plain" | "application/octet-stream" | "") {
+                let body = String::from_utf8_lossy(&resp.bytes(64 << 20)?).into_owned();
                 if let Some(refs) = parse_dumb_refs(&body) {
                     let mut caps: HashSet<String> = ["dumb".to_string()].into();
                     if let Some(head) = self.get_maybe("HEAD")? {
@@ -86,8 +138,7 @@ impl Http {
             }
             bail!("{} doesn't look like a git repository (check the address)", redact(&self.base));
         }
-        let mut body = Vec::new();
-        resp.into_reader().take(256 << 20).read_to_end(&mut body)?;
+        let body = resp.bytes(256 << 20)?;
         let mut r: &[u8] = &body;
         let first = read_pkt(&mut r)?.context("empty reply from the git server")?;
         if !first.starts_with(b"# service=") {
@@ -102,21 +153,11 @@ impl Http {
     /// A file from a "dumb" server (objects, packs, HEAD), or None if it isn't there.
     pub fn get_maybe(&mut self, path: &str) -> Result<Option<Vec<u8>>> {
         let url = format!("{}/{path}", self.base);
-        let result = self.send(|agent, auth| {
-            let mut req = agent.get(&url);
-            if let Some(a) = auth {
-                req = req.set("Authorization", a);
-            }
-            req.call()
-        });
-        match result {
-            Ok(resp) => {
-                let mut body = Vec::new();
-                resp.into_reader().take(4 << 30).read_to_end(&mut body)?;
-                Ok(Some(body))
-            }
-            Err(e) if e.to_string().contains("(404)") => Ok(None),
-            Err(e) => Err(e),
+        let resp = self.send_inner("GET", &url, &[], None)?;
+        match resp.status {
+            404 => Ok(None),
+            code if code >= 400 => bail!("{}: the server replied {code} for {path}", redact(&self.base)),
+            _ => Ok(Some(resp.bytes(4 << 30)?)),
         }
     }
 
@@ -132,18 +173,12 @@ impl Http {
         let fetched: Vec<Result<Option<Vec<u8>>>> = pool.install(|| {
             rest.par_iter()
                 .map(|p| {
-                    let mut req = agent.get(&format!("{base}/{p}"));
-                    if let Some(h) = &header {
-                        req = req.set("Authorization", h);
-                    }
-                    match req.call() {
-                        Ok(resp) => {
-                            let mut body = Vec::new();
-                            resp.into_reader().take(4 << 30).read_to_end(&mut body)?;
-                            Ok(Some(body))
-                        }
-                        Err(ureq::Error::Status(404, _)) => Ok(None),
-                        Err(e) => Err(anyhow!("couldn't fetch {p} from {}: {e}", redact(&base))),
+                    let headers: Vec<(&str, &str)> = header.as_deref().map(|h| vec![("Authorization", h)]).unwrap_or_default();
+                    let resp = request(&agent, "GET", &format!("{base}/{p}"), &headers, None)?;
+                    match resp.status {
+                        404 => Ok(None),
+                        code if code >= 400 => Err(anyhow!("{}: the server replied {code} for {p}", redact(&base))),
+                        _ => Ok(Some(resp.bytes(4 << 30)?)),
                     }
                 })
                 .collect()
@@ -160,32 +195,35 @@ impl Http {
         let url = format!("{}/git-{}", self.base, self.service);
         let content_type = format!("application/x-git-{}-request", self.service);
         let accept = format!("application/x-git-{}-result", self.service);
-        let resp = self.send(|agent, auth| {
-            let mut req = agent.post(&url).set("Content-Type", &content_type).set("Accept", &accept);
-            if let Some(a) = auth {
-                req = req.set("Authorization", a);
-            }
-            req.send_bytes(body)
-        })?;
-        Ok(Box::new(resp.into_reader()))
+        let resp = self.send("POST", &url, &[("Content-Type", &content_type), ("Accept", &accept)], Some(body))?;
+        Ok(resp.reader())
     }
 
-    /// Make a request, signing in if the server asks for it.
-    pub fn send(&mut self, request: impl Fn(&ureq::Agent, Option<&str>) -> Result<ureq::Response, ureq::Error>) -> Result<ureq::Response> {
+    /// Make a request, signing in if the server asks for it. Statuses of 400 and
+    /// above become errors that say what to do.
+    pub fn send(&mut self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<Reply> {
+        let shown = redact(&self.base);
+        let resp = self.send_inner(method, url, headers, body)?;
+        match resp.status {
+            403 => bail!("{shown} refused access (403): this account or token isn't allowed to {}", self.action()),
+            404 => bail!("{shown}: repository not found (404). Check the address, and that you have access to it"),
+            code if code >= 400 => bail!("{shown}: the server replied {code}"),
+            _ => Ok(resp),
+        }
+    }
+
+    /// `send`, but any status other than a sign-in failure comes back as a reply.
+    fn send_inner(&mut self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<Reply> {
         let shown = redact(&self.base);
         loop {
-            let header = self.auth.as_ref().map(|c| format!("Basic {}", base64(format!("{}:{}", c.username, c.password).as_bytes())));
-            match request(&self.agent, header.as_deref()) {
-                Ok(resp) => {
-                    if let Some(c) = self.auth.as_mut() {
-                        if c.from_helper && !c.approved {
-                            let _ = run_helper("approve", &helper_input(&self.base, Some(c))); // remember what worked
-                            c.approved = true;
-                        }
-                    }
-                    return Ok(resp);
-                }
-                Err(ureq::Error::Status(401, _)) => match self.auth.take() {
+            let auth = self.auth.as_ref().map(|c| format!("Basic {}", base64(format!("{}:{}", c.username, c.password).as_bytes())));
+            let mut all: Vec<(&str, &str)> = headers.to_vec();
+            if let Some(a) = &auth {
+                all.push(("Authorization", a));
+            }
+            let resp = request(&self.agent, method, url, &all, body)?;
+            if resp.status == 401 {
+                match self.auth.take() {
                     None => {
                         self.auth = Some(fill(&self.base)?);
                         continue; // try again, signed in
@@ -199,16 +237,17 @@ impl Http {
                              token with access to this repository, not your account password"
                         );
                     }
-                },
-                Err(ureq::Error::Status(403, _)) => {
-                    bail!("{shown} refused access (403): this account or token isn't allowed to {}", self.action())
                 }
-                Err(ureq::Error::Status(404, _)) => {
-                    bail!("{shown}: repository not found (404). Check the address, and that you have access to it")
-                }
-                Err(ureq::Error::Status(code, resp)) => bail!("{shown}: the server replied {code} {}", resp.status_text()),
-                Err(ureq::Error::Transport(t)) => bail!("couldn't reach {shown}: {t}"),
             }
+            if resp.status < 400 {
+                if let Some(c) = self.auth.as_mut() {
+                    if c.from_helper && !c.approved {
+                        let _ = run_helper("approve", &helper_input(&self.base, Some(c))); // remember what worked
+                        c.approved = true;
+                    }
+                }
+            }
+            return Ok(resp);
         }
     }
 

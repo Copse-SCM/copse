@@ -65,13 +65,13 @@ fn fxhash(data: &[u8]) -> u64 {
 }
 
 /// How much of the larger file the two share, in percent.
-fn similarity(a: &Profile, b: &Profile) -> u32 {
+fn similarity(a: &Profile, b: &Profile, threshold: u32) -> u32 {
     let max = a.bytes.max(b.bytes);
     if max == 0 {
         return 100;
     }
     // A big size difference rules it out before comparing lines (as git does).
-    if a.bytes.min(b.bytes) * 100 < max * THRESHOLD as usize {
+    if a.bytes.min(b.bytes) * 100 < max * threshold as usize {
         return 0;
     }
     let (small, large) = if a.lines.len() <= b.lines.len() { (a, b) } else { (b, a) };
@@ -91,8 +91,9 @@ fn basename(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
 
-/// Renames from `old` to `new`.
-pub fn detect(repo: &Repo, old: &Files, new: &Files) -> Vec<Rename> {
+/// Renames from `old` to `new`: files at least `threshold` percent the same
+/// (THRESHOLD normally; -X find-renames=N changes it).
+pub fn detect_with(repo: &Repo, old: &Files, new: &Files, threshold: u32) -> Vec<Rename> {
     let deleted: Vec<(&String, &(Mode, Id))> = old.iter().filter(|(p, (m, _))| is_file(*m) && !new.contains_key(*p)).collect();
     let added: Vec<(&String, &(Mode, Id))> = new.iter().filter(|(p, (m, _))| is_file(*m) && !old.contains_key(*p)).collect();
     if deleted.is_empty() || added.is_empty() {
@@ -139,8 +140,8 @@ pub fn detect(repo: &Repo, old: &Files, new: &Files) -> Vec<Rename> {
         let Some(fp) = fp else { continue };
         for (j, tp) in to_profiles.iter().enumerate() {
             let Some(tp) = tp else { continue };
-            let score = similarity(fp, tp);
-            if score >= THRESHOLD {
+            let score = similarity(fp, tp, threshold);
+            if score >= threshold.max(1) {
                 let same_name = basename(deleted[i].0) == basename(added[j].0);
                 candidates.push((score, same_name, i, j));
             }
@@ -216,11 +217,11 @@ mod tests {
     fn similarity_scores() {
         let a = profile(b"one\ntwo\nthree\nfour\n").unwrap();
         let b = profile(b"one\ntwo\nthree\nfour\n").unwrap();
-        assert_eq!(similarity(&a, &b), 100);
+        assert_eq!(similarity(&a, &b, THRESHOLD), 100);
         let c = profile(b"one\ntwo\nthree\nFIVE\n").unwrap();
-        assert!(similarity(&a, &c) >= 70);
+        assert!(similarity(&a, &c, THRESHOLD) >= 70);
         let d = profile(b"nothing\nin\ncommon\nhere\n").unwrap();
-        assert_eq!(similarity(&a, &d), 0);
+        assert_eq!(similarity(&a, &d, THRESHOLD), 0);
         assert!(profile(b"bin\0ary").is_none());
     }
 

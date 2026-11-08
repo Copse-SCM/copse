@@ -97,12 +97,25 @@ chmod +x "$WORK/keep-three.sh"
 printf 'e\n' | COPSE_EDITOR="$WORK/keep-three.sh" cps commit -p -m "edited" -- s.txt >/dev/null
 same "$(cps show HEAD:s.txt | sed -n '3,5p' | tr '\n' ',')" "3,three,5," "e edits a change: an added line left out, a removed line kept"
 same "$(sed -n '3,4p' s.txt | tr '\n' ',')" "three,four," "the file on disk keeps all of it"
+cps commit -m "the rest of s" >/dev/null && seq 1 12 > s.txt && cps commit -m plain-again >/dev/null
+seq 1 12 | sed -e 's/^3$/three/' -e 's/^4$/four/' > s.txt
+cat > "$WORK/rewrite.sh" <<'ED'
+#!/bin/sh
+# Rewrite an added line and add one of our own, as git's e allows.
+perl -pi -e 's/^\+four$/+FOUR (rewritten)\n+an extra line/' "$1"
+ED
+chmod +x "$WORK/rewrite.sh"
+printf 'e\n' | COPSE_EDITOR="$WORK/rewrite.sh" cps commit -p -m "rewritten" -- s.txt >/dev/null
+same "$(cps show HEAD:s.txt | sed -n '3,6p' | tr '\n' ',')" "three,FOUR (rewritten),an extra line,5," "e can rewrite + lines and add new ones; that's what gets committed"
+same "$(sed -n '3,4p' s.txt | tr '\n' ',')" "three,four," "while the file on disk stays as it was"
+cps commit -m "back to the file" >/dev/null && seq 1 12 > s.txt && cps commit -m plain-3 >/dev/null
+seq 1 12 | sed -e 's/^3$/three/' > s.txt
 cat > "$WORK/bad-edit.sh" <<'ED'
 #!/bin/sh
-perl -pi -e 's/^\+four$/+FIVE/' "$1"
+perl -ni -e 'print unless /^-3$/' "$1"
 ED
 chmod +x "$WORK/bad-edit.sh"
-out=$(printf 'e\nn\n' | NO_COLOR=1 COPSE_EDITOR="$WORK/bad-edit.sh" cps commit -p -m "bad" -- s.txt 2>&1 || true); [[ "$out" == *"Not used:"* ]] && ok "an edit that changes text is refused, and the question is asked again" || fail "$out"
+out=$(printf 'e\nn\n' | NO_COLOR=1 COPSE_EDITOR="$WORK/bad-edit.sh" cps commit -p -m "bad" -- s.txt 2>&1 || true); [[ "$out" == *"Not used:"* && "$out" == *"have to stay as they were"* ]] && ok "an edit that drops a - line is refused (as git refuses it), and the question is asked again" || fail "$out"
 cps commit -m sync5 >/dev/null && seq 1 12 > s.txt && cps commit -m plain2 >/dev/null
 seq 1 12 | sed -e 's/^3$/three/' > s.txt
 cps commit -m "by line" --pick=l01:s.txt >/dev/null && same "$(cps show HEAD:s.txt | sed -n '3,4p' | tr '\n' ',')" "3,three," "--pick takes single lines (here: only the added line)"
