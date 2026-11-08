@@ -540,6 +540,7 @@ Every command that takes a revision understands git's names: a branch, `origin/m
 - **Versions are dates:** `YEAR.MONTH.N`, so `2026.11.0` is November 2026's first release and `2026.11.1` the next. The version is in `Cargo.toml`.
 - **A release** is made by pushing a tag `v2026.11.0` (it must match `Cargo.toml`). `.github/workflows/release.yml` builds copse for macOS (Apple Silicon and Intel) and Linux x86_64, checks each build reports the right version, and publishes a GitHub release with the archives (copse, LICENSE, NOTICE, README) and `SHA256SUMS`.
 - **Nightly builds** (`.github/workflows/nightly.yml`) run every morning at 06:17 UTC, if main changed since the last one, and replace the `nightly` pre-release. They're named `2026.11.09-dev+abc1234`: the date and the commit. Running the workflow by hand from the Actions tab makes one straight away.
+- **Homebrew:** the tap is [Copse-SCM/homebrew-copse](https://github.com/Copse-SCM/homebrew-copse) (`brew install copse-scm/copse/copse`; `--HEAD` builds main from source). After publishing a release, the release workflow rewrites its formula with `packaging/homebrew/render.py` (version, download addresses and checksums from the release's `SHA256SUMS`). That needs a `HOMEBREW_TAP_TOKEN` secret: a fine-grained token for the tap repository only, with "Contents: read and write". The tap's README is kept in `packaging/homebrew/tap/`.
 - Both share `.github/workflows/build.yml`. A build's version comes from `COPSE_BUILD` at compile time; without it, `copse version` shows `Cargo.toml`'s.
 
 ## How it's tested

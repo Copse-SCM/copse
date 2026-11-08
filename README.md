@@ -13,7 +13,13 @@ copse is versioned with itself and pushed with copse to [Copse-SCM/copse](https:
 
 ## Install
 
-Download the archive for your machine from the [latest release](https://github.com/Copse-SCM/copse/releases/latest) (macOS on Apple Silicon or Intel, Linux on x86_64), unpack it, and put `copse` on your `PATH`:
+With [Homebrew](https://brew.sh) (macOS or Linux), from the first release on:
+
+```bash
+brew install copse-scm/copse/copse
+```
+
+Or download the archive for your machine from the [latest release](https://github.com/Copse-SCM/copse/releases/latest) (macOS on Apple Silicon or Intel, Linux on x86_64), unpack it, and put `copse` on your `PATH`:
 
 ```bash
 tar xzf copse-*.tar.gz && sudo mv copse-*/copse /usr/local/bin/
