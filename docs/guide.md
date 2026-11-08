@@ -62,7 +62,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse status` (`st`) | List added (A), modified (M) and deleted (D) files, and say where you stand against `origin` (in step, commits to push or pull, or diverged) |
 | `copse status --porcelain` | The same in a stable, plain format for scripts and editors, one fact per line: `branch NAME` (or `branch (detached) ID`), `upstream origin/NAME AHEAD BEHIND`, `state merging` (or `rebasing`, `cherry-picking`, `reverting`, `bisecting`), then `A`/`M`/`D PATH` for each change, and `C PATH` for files with conflict markers. Never coloured, never reworded between versions. |
 | `copse commit -m "msg" [paths...]` (`ci`) | Snapshot every file that isn't ignored. There is no staging step: give paths to commit only changes under them, leaving the rest uncommitted. |
-| `copse commit -p [-m "msg"] [paths...]` | Pick which changes to commit, one at a time, like `git add -p`: for each change ("hunk") answer `y`/`n`, or `a` (the rest of this file), `d` (skip the rest of this file), `s` (split it into smaller changes), `e` (edit it in your editor: delete `+` lines you don't want, turn `-` lines you want to keep into a space), `q` (stop). Only what you pick is committed; your files aren't touched, and the rest stays uncommitted. New files, deletions and non-text files are a single yes/no. |
+| `copse commit -p [-m "msg"] [paths...]` | Pick which changes to commit, one at a time, like `git add -p`: for each change ("hunk") answer `y`/`n`, or `a` (the rest of this file), `d` (skip the rest of this file), `s` (split it into smaller changes), `e` (edit it in your editor, as git allows: change, add or delete `+` lines, or turn a `-` line into a space to keep it; context and `-` lines otherwise stay as they are), `q` (stop). Only what you pick is committed; your files aren't touched, and the rest stays uncommitted. New files, deletions and non-text files are a single yes/no. |
 | `copse commit -S` / `--no-gpg-sign` | Sign the commit with your SSH or GPG key (git's format, so GitHub shows it as Verified); `commit.gpgSign` signs every commit |
 | `copse verify-commit [rev...]` | Check commits' signatures |
 | `copse tag -s <name> -m "..."` / `copse verify-tag <name>` | Make a signed tag (git's format); check a tag's signature |
@@ -71,7 +71,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse diff [rev [rev]] [--stat] [-- paths]` | Changes: your files against the last commit, against `rev`, or between two revisions (`A B` or `A..B`). `--stat` gives a per-file summary like git's; `-- paths` limits it to some files or folders. |
 | `copse show [rev] [--stat]` | One commit (default: the latest): author, date in the author's timezone, message, and exactly what it changed. Annotated tags show their own message first; merges list their parents. |
 | `copse show REV:path` | A file as it was in that commit (or a folder's listing), as git prints it: `copse show HEAD~2:src/main.rs`, `copse show v1.0:README.md`, `copse show :file` for the current commit's |
-| `copse log [rev...] [options] [-- paths]` | All of history, newest first, merged branches included. `--oneline`, `--graph`, `-p` (changes), `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-n`, and `-- paths` for commits that touched those paths. `--pretty`/`--format` take git's formats (`oneline`, `short`, `medium`, `full`, `fuller`, `reference`, `raw`) or a template with git's placeholders (`%h %an %ad %s`, `%b`, `%d`, colours...), and `--date` takes `iso`, `iso-strict`, `rfc`, `short`, `raw`, `unix` or `relative`; all checked against git's output. |
+| `copse log [rev...] [options] [-- paths]` | All of history, newest first, merged branches included. `--oneline`, `--graph`, `-p` (changes), `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-n` (or `-5`, as in git), and `-- paths` for commits that touched those paths. `--pretty`/`--format` take git's formats (`oneline`, `short`, `medium`, `full`, `fuller`, `reference`, `raw`) or a template with git's placeholders (`%h %an %ad %s`, `%b`, `%d`, colours...), and `--date` takes `iso`, `iso-strict`, `rfc`, `short`, `raw`, `unix` or `relative`; all checked against git's output. |
 | `copse branch [name [rev]]` | List branches, or create one (at the current commit, or at `rev`) |
 | `copse branch -d <name>` / `-D <name>` | Delete a branch. `-d` refuses if its work isn't merged into your current branch; `-D` deletes anyway. Either way, copse prints the command that brings it back. |
 | `copse branch -m [old] <new>` | Rename a branch (the current one if `old` is left out); `-M` replaces an existing name |
@@ -79,7 +79,11 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse merge --abort` | Give up on a merge that stopped on conflicts |
 | `copse merge --no-ff` / `--ff-only` / `-m msg` | Always make a merge commit (keeping the branch's commits visible as a group), only fast-forward, or set the merge message |
 | `copse merge -X ours` / `-X theirs` | Where both sides changed the same lines (or the same binary file or symlink), take that side instead of stopping on a conflict. Everything else merges as usual. Also on `pull`, `rebase`, `cherry-pick` and `revert` (and kept through `--continue`). `-X no-renames` turns off rename detection. |
+| `copse merge -X ignore-space-change` (and `ignore-all-space`, `ignore-space-at-eol`, `ignore-cr-at-eol`) | Lines that differ only in whitespace count as the same: our respacing is kept, their real changes merge in (as in git). Handy when one side reformatted. |
+| `copse merge -X patience` / `-X diff-algorithm=...` | Line the files up with the patience algorithm (`histogram` is treated as patience; `myers` and `minimal` are the default) |
+| `copse merge -X find-renames=N` / `-X rename-threshold=N` | How similar (in percent, default 50) a file must be to count as renamed; `-X no-renames` turns rename detection off |
 | `copse merge -s ours` | Record a merge but keep the current branch's files exactly as they are (to mark a branch as dealt with). Always makes a merge commit. |
+| `copse merge A B C` (or `-s octopus`) | Merge several branches at once into one commit with all of them as parents, as git's octopus does. If any of them conflicts, nothing changes, and copse says to merge them one at a time. `-s resolve` and `-s recursive` are the normal merge. |
 | `copse stash [-m note]` | Put all uncommitted changes aside and reset to the last commit |
 | `copse stash -- <paths>` | Put aside only the changes to those files or folders, leaving the rest in place |
 | `copse stash list` / `show [n]` | List stashes (0 is newest), or show which files one changes |
@@ -289,7 +293,7 @@ To GitHub, copse looks like any other git client. Commits, authors, emails, time
 
 **Older servers (cgit):** servers that only offer git's "dumb" protocol (plain files over HTTP, as cgit serves) can be cloned, fetched and pulled from; copse downloads the objects and packs it needs. They're read-only, and have no shallow or partial clones, so copse says so if you ask.
 
-**Names and messages that aren't UTF-8** (from very old repositories, or with an `encoding` header such as Latin-1) round-trip exactly: every byte comes back when pushed, so git ids don't change. Latin-1 messages are shown as readable text, as git shows them. On disk, a byte that isn't valid UTF-8 in a file name appears as a stand-in character (macOS doesn't allow such names), and git still sees the original bytes.
+**Names and messages that aren't UTF-8** (from very old repositories, or with an `encoding` header such as Latin-1) round-trip exactly: every byte comes back when pushed, so git ids don't change. Latin-1 messages are shown as readable text, as git shows them. On Linux, such a file name is written with exactly git's bytes, and names like that made by other programs are tracked too. macOS doesn't allow them, so there the odd bytes appear as stand-in characters on disk; git still gets the original bytes either way.
 
 Pushing to github.com is in daily use: copse itself is versioned with copse and pushed to GitHub.
 
@@ -399,7 +403,8 @@ copse push                   # uploads the files' contents to the LFS server, th
 - **Fetched when needed:** older versions are downloaded when something reads them, such as `log -p`, `diff`, checking out an old commit, or a merge.
 - **`fsck`** reports them as not downloaded yet, rather than missing.
 - **Pushing** from a partial clone fetches whatever the other side needs on the way.
-- **Works with copse repositories and git servers.** `.copse/promisor` names the remote to fetch from. From a git server, a file not downloaded yet is named by its git id, and fetched by that id when it's needed (the server must allow filters, as GitHub does).
+- **Works with copse repositories and git servers.** `.copse/promisor` names the remote to fetch from.
+- **The `.git` view** works in a partial clone of a git server: copse writes what it has into a pack git recognizes as coming from origin, and git fetches anything else from origin itself (so `git show`, `git log -p`, `git fsck` all work). From a git server, a file not downloaded yet is named by its git id, and fetched by that id when it's needed (the server must allow filters, as GitHub does).
 
 ## Worktrees and sparse checkout
 
@@ -542,6 +547,7 @@ Every command that takes a revision understands git's names: a branch, `origin/m
 - **A release** is made by pushing a tag `v2026.11.0` (it must match `Cargo.toml`). `.github/workflows/release.yml` builds copse for macOS (Apple Silicon and Intel) and Linux x86_64, checks each build reports the right version, and publishes a GitHub release with the archives (copse, LICENSE, NOTICE, README) and `SHA256SUMS`.
 - **Nightly builds** (`.github/workflows/nightly.yml`) run every morning at 06:17 UTC, if main changed since the last one, and replace the `nightly` pre-release. They're named `2026.11.09-dev+abc1234`: the date and the commit. Running the workflow by hand from the Actions tab makes one straight away.
 - **Homebrew:** the tap is [Copse-SCM/homebrew-copse](https://github.com/Copse-SCM/homebrew-copse), with `copse` (the latest release; `--HEAD` builds main from source) and `copse-nightly` (the latest daily build). Both provide the `copse` command, so they conflict with each other. After publishing, the release workflow rewrites `copse` and the nightly workflow rewrites `copse-nightly` with `packaging/homebrew/render.py` (version, download addresses and checksums from the release's `SHA256SUMS`). Both need a `HOMEBREW_TAP_TOKEN` secret: a fine-grained token for the tap repository only, with "Contents: read and write". The tap's README is kept in `packaging/homebrew/tap/`.
+- **A dry run:** running the Release workflow by hand from the Actions tab does everything a release does, but publishes a draft named `dry-run` (visible only to the repository's admins) and prints the Homebrew formula instead of pushing it. Delete the draft afterwards.
 - Both share `.github/workflows/build.yml`. A build's version comes from `COPSE_BUILD` at compile time; without it, `copse version` shows `Cargo.toml`'s.
 
 ## Checking real hosts
@@ -594,6 +600,5 @@ The logo lives in `assets/logo/`: the original design, plus versions tuned for e
 ## Not built yet
 
 - **Windows.** copse is built and tested on macOS and Linux only.
-- **The `.git` view in partial clones** (it works in shallow ones).
 
 [ROADMAP.md](../ROADMAP.md) has the full list, command by command.

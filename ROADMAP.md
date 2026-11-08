@@ -24,7 +24,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 **Known limits of the git bridge:**
 - **Submodules** round-trip exactly (git's 160000 entries and `.gitmodules`); `copse submodule update --init` checks them out.
 - **Signed commits** (SSH or GPG) verify on git and GitHub. Rebased and amended commits lose their signature unless signed again; git behaves the same.
-- **File names and commit messages that aren't UTF-8** round-trip byte for byte (same git ids); Latin-1 messages display readably.
+- **File names and commit messages that aren't UTF-8** round-trip byte for byte (same git ids); on Linux such names are written to disk with their exact bytes (macOS uses stand-ins); Latin-1 messages display readably.
 - **Older "dumb" HTTP servers** (cgit): clone, fetch and pull (read-only by nature), fetching eight objects at a time. Tested against git.symlinx.net (cgit): six repositories with identical files, history and git ids.
 - **GitLab** (gitlab.com, 2026-11-08): all 28 checks of `tests/hosted/check.sh` (push, pull, merges, conflicts, rebase, branches, tags, force push, shallow and partial clones, LFS) on a private project.
 - **Tags** travel to and from git servers (lightweight and annotated, exact round trips), and between copse repositories.
@@ -39,7 +39,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | `init`, `init --bare` | ✅ | |
 | `status` | ✅ | Where you stand against origin (ahead/behind); `--porcelain` for scripts and editors |
 | Staging area (`add`) | ➖ | `commit` snapshots everything that isn't ignored |
-| Commit only some files (`commit <paths>`) | ✅ | Whole files or folders, or pick changes within files with `commit -p` (like `add -p`, with split and edit), or single lines in the TUI |
+| Commit only some files (`commit <paths>`) | ✅ | Whole files or folders, or pick changes within files with `commit -p` (like `add -p`, with split and any edit git allows), or single lines in the TUI |
 | `commit -m` | ✅ | |
 | `commit --amend` | ✅ | Keeps author and date; with or without a new message; can take paths |
 | `diff` | ✅ | Your files or any revision vs any revision, `A..B`, `--stat` (matches git's), `-- paths` |
@@ -58,7 +58,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | `checkout` / `switch` | ✅ | Branches, ids, `HEAD~N`, `origin/main` |
 | `restore` (files or folders, from any commit) | ✅ | Saves uncommitted edits as a stash before overwriting them |
 | `reset` (default and `--hard`) | ✅ | Default keeps your files (git's `--soft`/`--mixed` are the same without a staging area); `--hard` backs up uncommitted work first; `undo` reverses either |
-| `merge` | ✅ | `--no-ff`, `--ff-only`, `-m`; follows renames and folder moves, as git does (also in rebase, cherry-pick, revert, stash); fast-forwards touch only changed files. `-s ours`; `-X ours`/`theirs`/`no-renames` (also on pull, rebase, cherry-pick, revert) |
+| `merge` | ✅ | `--no-ff`, `--ff-only`, `-m`; follows renames and folder moves, as git does (also in rebase, cherry-pick, revert, stash); fast-forwards touch only changed files. `-s ours`, `octopus` (`merge A B C`), `resolve`; `-X ours`/`theirs`, whitespace (`ignore-space-change`, `ignore-all-space`, `ignore-space-at-eol`, `ignore-cr-at-eol`), `patience`/`diff-algorithm=`, `find-renames=N`, `no-renames` (also on pull, rebase, cherry-pick, revert); checked against git |
 | `rebase`, `rebase -i` | ✅ | All six actions plus `exec`, `--onto`, `--autosquash`, `-x` |
 | `cherry-pick`, `revert` | ✅ | Single commits and ranges, conflicts with continue/skip/abort, merges with `-m N` |
 | `stash` | ✅ | Including only some files (`copse stash -- paths`) |
