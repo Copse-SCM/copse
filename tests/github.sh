@@ -96,7 +96,7 @@ git_clone_matches main "server now has copse's version"
 
 echo "== rewritten history"
 for i in 1 2 3; do echo "$i" > "n$i.txt" && cps commit -m "n$i" >/dev/null; done
-printf '%s\n' '#!/bin/sh' 'sed -i "" -e "2s/^pick/squash/" -e "3s/^pick/fixup/" "$1"' > ../squash-editor && chmod +x ../squash-editor
+printf '%s\n' '#!/bin/sh' 'perl -pi -e "s/^pick/squash/ if \$. == 2; s/^pick/fixup/ if \$. == 3" "$1"' > ../squash-editor && chmod +x ../squash-editor
 COPSE_EDITOR=../squash-editor cps rebase -i HEAD~3 >/dev/null
 cps push gh --force >/dev/null && fsck "squashed history pushes cleanly" || fail "line $LINENO: a step before this check failed"
 same "$(git -C ../server.git log -1 --format='%s|%an|%cn' main)" "n1|Test Person|Test Person" "squash keeps author; committer recorded"
@@ -230,7 +230,8 @@ mkdir -p web/private && git init -q --bare -b main web/proj.git && git init -q -
 python3 "$(cd "$(dirname "$COPSE")/../../tests" && pwd)/git-http-server.py" "$WORK/web" > web-port.txt 2> web-server.log &
 server_pid=$!
 trap 'kill $server_pid 2>/dev/null' EXIT
-for _ in $(seq 1 50); do [[ -s web-port.txt ]] && break; perl -e 'select(undef,undef,undef,0.1)'; done
+for _ in $(seq 1 300); do [[ -s web-port.txt ]] && break; perl -e 'select(undef,undef,undef,0.1)'; done
+[[ -s web-port.txt ]] || fail "the test HTTP server didn't start within 30 seconds: $(cat web-server.log)"
 base="http://127.0.0.1:$(cat web-port.txt)"
 # Sign-in goes through git's credential helpers. Use git's "store" helper with a file this test controls.
 export GIT_CONFIG_GLOBAL="$WORK/gitconfig-http" GIT_TERMINAL_PROMPT=0

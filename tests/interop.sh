@@ -121,7 +121,7 @@ mkdir big && cd big && cps init >/dev/null
 for i in 1 2 3 4 5; do head -c 30000 /dev/urandom | base64 > data.txt; echo "$i" > n.txt; cps commit -m "c$i" >/dev/null; done
 cd .. && cps clone --filter=blob:none big part >/dev/null && cd part
 same "$(cat n.txt)" "5" "clone --filter=blob:none checks out the newest files"
-small=$(du -sk .copse/objects | awk '{print $1}'); fullsize=$(du -sk ../big/.copse/objects | awk '{print $1}')
+small=$(bytes_in .copse/objects); fullsize=$(bytes_in ../big/.copse/objects)
 [[ $small -lt $((fullsize / 2)) ]] && ok "while downloading far less (${small} KB vs ${fullsize} KB)" || fail "partial clone is ${small} KB, full is ${fullsize} KB"
 cps fsck | has "aren't downloaded yet" && cps fsck | has "everything is intact" && ok "fsck counts the rest as not downloaded yet, not missing" || fail "line $LINENO: a step before this check failed"
 cps log -p -n 4 | has "^-1$" && ok "older versions are fetched when they're needed (log -p)" || fail "line $LINENO: a step before this check failed"

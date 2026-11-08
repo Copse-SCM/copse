@@ -43,3 +43,9 @@ fmode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 hashin() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi
 }
+
+# The bytes of all the files under a folder, in KB (what's stored, not disk blocks:
+# Linux filesystems charge a whole 4 KB block even for a tiny file or empty folder).
+bytes_in() {
+  python3 -c "import os,sys; print(sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(sys.argv[1]) for f in fs) // 1024)" "$1"
+}

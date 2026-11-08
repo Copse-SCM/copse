@@ -60,7 +60,7 @@ same "$(titles)" "c10,c9,c8" "with only the newest 3 commits of history"
 same "$(tags)" "v0.5,v1.0,v1.1" "and only the tags that point into it (not 'ancient')"
 cps fsck | has "everything is intact" && ok "fsck accepts the shallow boundary" || fail "line $LINENO: a step before this check failed"
 [[ -f .copse/shallow ]] && ok "the boundary is recorded in .copse/shallow" || fail "line $LINENO: a step before this check failed"
-size_shallow=$(du -sk .copse/objects | awk '{print $1}')
+size_shallow=$(bytes_in .copse/objects)
 cps gc --prune now >/dev/null && cps fsck >/dev/null && ok "gc works on it" || fail "line $LINENO: a step before this check failed"
 cd ../src && echo 11 > n.txt && cps commit -m c11 >/dev/null && cd ../shallow
 cps pull >/dev/null && same "$(titles)" "c11,c10,c9,c8" "pull brings new commits, staying shallow" || fail "line $LINENO: a step before this check failed"

@@ -45,7 +45,7 @@ cps checkout -f 'HEAD@{1}' >/dev/null && same "$(cat f.txt)" "1" "HEAD@{1} is wh
 echo "== undo a squash"
 for i in 3 4 5; do echo "$i" > "n$i.txt" && cps commit -m "n$i" >/dev/null; done
 before=$(history)
-printf '%s\n' '#!/bin/sh' 'sed -i "" -e "2s/^pick/fixup/" -e "3s/^pick/fixup/" "$1"' > ../squash-editor && chmod +x ../squash-editor
+printf '%s\n' '#!/bin/sh' 'perl -pi -e "s/^pick/fixup/ if \$. == 2 || \$. == 3" "$1"' > ../squash-editor && chmod +x ../squash-editor
 COPSE_EDITOR=../squash-editor cps rebase -i HEAD~3 >/dev/null
 same "$(history)" "n3,two,one" "squashed three commits into one"
 cps undo | has "Undid \`rebase -i HEAD~3\`" && same "$(history)" "$before" "undo brings all three back" || fail "line $LINENO: a step before this check failed"
