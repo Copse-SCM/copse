@@ -66,13 +66,18 @@ impl GitMap {
             let copse = Id::from_bytes(rec[..32].try_into().unwrap());
             let git: GitId = rec[32..].try_into().unwrap();
             map.to_git.insert(copse, git);
-            map.from_git.entry(git).or_insert(copse);
+            map.from_git.insert(git, copse); // the latest record wins (see `replace`)
         }
         Ok(map)
     }
 
     pub fn git(&self, id: &Id) -> Option<GitId> {
         self.to_git.get(id).copied()
+    }
+
+    /// Whether every one of these has a git id.
+    pub fn knows_all(&self, ids: &std::collections::HashSet<Id>) -> bool {
+        ids.iter().all(|id| self.to_git.contains_key(id))
     }
 
     pub fn copse(&self, id: &GitId) -> Option<Id> {
@@ -84,6 +89,14 @@ impl GitMap {
             self.from_git.entry(git).or_insert(copse);
             self.pending.push((copse, git));
         }
+    }
+
+    /// Point a git id at a new copse id (a shallow clone's commits, renumbered once
+    /// their real parents arrive). Recorded after the old pair, so it wins on reload.
+    pub fn replace(&mut self, copse: Id, git: GitId) {
+        self.to_git.insert(copse, git);
+        self.from_git.insert(git, copse);
+        self.pending.push((copse, git));
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -125,7 +138,7 @@ fn git_mode(mode: Mode) -> &'static str {
 /// git orders tree entries by name, but compares a folder as if its name ended in '/'.
 /// (So "foo.txt" sorts before the folder "foo", because '.' comes before '/'.)
 fn git_sort_key(name: &str, mode: Mode) -> Vec<u8> {
-    let mut key = name.as_bytes().to_vec();
+    let mut key = crate::objects::to_git_bytes(name);
     if mode == Mode::Dir {
         key.push(b'/');
     }
@@ -232,10 +245,10 @@ impl<'a> Translator<'a> {
         if let Some(s) = &t.tagger {
             head += &format!("tagger {} {} {}\n", s.who, s.time, s.tz);
         }
-        let mut out = head.into_bytes();
+        let mut out = crate::objects::to_git_bytes(&head);
         out.extend_from_slice(&t.extra);
         out.push(b'\n');
-        out.extend_from_slice(t.message.as_bytes());
+        out.extend_from_slice(&crate::objects::to_git_bytes(&t.message));
         Ok(out)
     }
 
@@ -270,7 +283,8 @@ impl<'a> Translator<'a> {
                 self.collect(e.id, seen, trees, blobs)?;
             } else if e.mode == Mode::Submodule {
                 // Its git id is in the entry itself.
-            } else if self.map.git(&e.id).is_none() && seen.insert(e.id) {
+            } else if self.map.git(&e.id).is_none() && !crate::objects::is_gitlink(&e.id) && seen.insert(e.id) {
+                // (A file named by its git id, in a partial clone, needs no hashing.)
                 blobs.push(e.id);
             }
         }
@@ -283,14 +297,15 @@ impl<'a> Translator<'a> {
         entries.sort_by_cached_key(|e| git_sort_key(&e.name, e.mode));
         let mut out = Vec::with_capacity(entries.len() * 40);
         for e in entries {
-            let child = if e.mode == Mode::Submodule {
-                crate::objects::gitlink_sha(&e.id)
-            } else {
-                self.map.git(&e.id).context("internal error: tree entry wasn't translated")?
+            let child = match self.map.git(&e.id) {
+                Some(g) if e.mode != Mode::Submodule => g,
+                // A submodule's commit, or a file a partial clone named by its git id.
+                _ if e.mode == Mode::Submodule || crate::objects::is_gitlink(&e.id) => crate::objects::gitlink_sha(&e.id),
+                _ => bail!("internal error: tree entry wasn't translated"),
             };
             out.extend_from_slice(git_mode(e.mode).as_bytes());
             out.push(b' ');
-            out.extend_from_slice(e.name.as_bytes());
+            out.extend_from_slice(&crate::objects::to_git_bytes(&e.name));
             out.push(0);
             out.extend_from_slice(&child);
         }
@@ -310,14 +325,19 @@ impl<'a> Translator<'a> {
         let tree = self.map.git(&c.tree).context("internal error: commit tree wasn't translated")?;
         let mut head = format!("tree {}\n", hex(&tree));
         for p in &c.parents {
-            let parent = self.map.git(p).context("internal error: parent commit wasn't translated")?;
+            // A shallow clone's boundary keeps its missing parents as their git ids.
+            let parent = match self.map.git(p) {
+                Some(g) => g,
+                None if crate::objects::is_gitlink(p) => crate::objects::gitlink_sha(p),
+                None => bail!("internal error: parent commit wasn't translated"),
+            };
             head += &format!("parent {}\n", hex(&parent));
         }
         head += &format!("author {}\ncommitter {}\n", sig(&c.author), sig(&c.committer));
-        let mut out = head.into_bytes();
+        let mut out = crate::objects::to_git_bytes(&head);
         out.extend_from_slice(&c.extra);
         out.push(b'\n');
-        out.extend_from_slice(c.message.as_bytes()); // exactly as stored, final newline or not
+        out.extend_from_slice(&crate::objects::to_git_bytes(&c.message)); // exactly as stored, final newline or not
         Ok(out)
     }
 
@@ -576,6 +596,14 @@ impl Session {
         }
     }
 
+    /// The HTTP connection, for a "dumb" server's plain files.
+    pub fn http(&mut self) -> Option<&mut crate::githttp::Http> {
+        match self {
+            Session::Http(h) => Some(h),
+            Session::Pipe(_) => None,
+        }
+    }
+
     /// Send our whole request and return the server's reply.
     pub fn exchange(&mut self, request: &[u8]) -> Result<Box<dyn Read + '_>> {
         match self {
@@ -633,8 +661,10 @@ impl RefUpdate {
 
 /// `copse push` to a git server: update every branch and tag in `updates` in one push.
 pub fn push(repo: &Repo, remote: &str, url: &str, updates: &[RefUpdate], force: bool) -> Result<()> {
-    if repo.is_shallow() {
-        bail!("this is a shallow clone, so it can't be translated for a git server (git ids depend on all of history). Run `copse fetch --unshallow` first");
+    // A shallow clone of a git server knows its boundary commits' git ids; one cloned
+    // from a copse repository doesn't, and git ids depend on all of history.
+    if repo.is_shallow() && !GitMap::load(repo)?.knows_all(&repo.shallow()) {
+        bail!("this is a shallow clone of a copse repository, so it can't be translated for a git server (git ids depend on all of history). Run `copse fetch --unshallow` first");
     }
     let mut session = Session::open(url, "receive-pack")?;
     let (refs, caps) = session.advertisement()?;

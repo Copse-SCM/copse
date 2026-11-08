@@ -76,7 +76,7 @@ fn unchanged_on_disk(repo: &Repo, index: &Index, path: &str, e: &Entry) -> Resul
     let id = if crate::lfs::Attrs::load(&repo.root).tracked(path) && matches!(mode, Mode::File | Mode::Exec) {
         crate::lfs::snapshot_blob(&repo.dir, &full, None)?
     } else {
-        Store::hash(Kind::Blob, &read_content(&full, mode)?)
+        crate::objects::blob_id_like(&Id::from_bytes(e.id), &read_content(&full, mode)?)
     };
     Ok(id.as_bytes() == &e.id)
 }

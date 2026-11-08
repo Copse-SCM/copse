@@ -133,7 +133,7 @@ cps pull --rebase >/dev/null && same "$(cat n.txt) $(cat other.txt)" "6 upstream
 [[ -f .copse/promisor ]] && ok "(.copse/promisor names where to fetch from)" || fail "line $LINENO: a step before this check failed"
 cd .. && cps init --bare up >/dev/null && cd part && cps remote add up ../up >/dev/null && cps push up >/dev/null
 cd .. && cps clone up full >/dev/null && cd full && cps fsck | tail -1 | has "everything is intact" && ! cps fsck | has "downloaded" && ok "pushing from a partial clone sends complete history" || fail "line $LINENO: a step before this check failed"
-cd .. && expect_fail "--filter with a git server says it isn't supported yet" "copse remotes" cps clone --filter=blob:none "$WORK/app.git" gp
+cd .. && expect_fail "--filter with a git server that doesn't allow filters says so" "doesn't support partial clones" cps clone --filter=blob:none "$WORK/app.git" gp
 expect_fail "unknown filters are refused" "unsupported --filter" cps clone --filter=tree:0 big x
 
 echo

@@ -248,12 +248,17 @@ pub fn snapshot(root: &Path, index: &Index, store: Option<&Store>) -> Result<Vec
                     return Ok(File { size: s.size, mtime_ns: s.mtime_ns, mode: s.mode, id, hashed: true, absent: false, path: s.path });
                 }
             }
-            if s.mode != Mode::Link && s.size >= crate::objects::STREAM_THRESHOLD {
+            // Named by its git id (a partial clone of a git server): compared by that.
+            let git_named = index.entries.get(&s.path).map(|e| Id::from_bytes(e.id)).filter(crate::objects::is_gitlink);
+            if s.mode != Mode::Link && s.size >= crate::objects::STREAM_THRESHOLD && git_named.is_none() {
                 let id = Store::put_file_streaming(store, &root.join(&s.path)).with_context(|| format!("reading {}", s.path))?;
                 return Ok(File { size: s.size, mtime_ns: s.mtime_ns, mode: s.mode, id, hashed: true, absent: false, path: s.path });
             }
             let data = read_content(&root.join(&s.path), s.mode).with_context(|| format!("reading {}", s.path))?;
-            let id = Store::hash(Kind::Blob, &data);
+            let id = match &git_named {
+                Some(g) => crate::objects::blob_id_like(g, &data),
+                None => Store::hash(Kind::Blob, &data),
+            };
             if let Some(store) = store {
                 store.put_with_id(&id, Kind::Blob, &data)?;
             }

@@ -138,7 +138,7 @@ pub fn load_history(exe: &Path, root: &Path, limit: usize) -> Vec<LogRow> {
 }
 
 fn title_of(repo: &Repo, id: &Id) -> String {
-    repo.read_commit(id).map(|c| c.message.lines().next().unwrap_or_default().to_string()).unwrap_or_default()
+    repo.read_commit(id).map(|c| c.for_display().message.lines().next().unwrap_or_default().to_string()).unwrap_or_default()
 }
 
 pub fn load_branches(repo: &Repo) -> Result<Vec<BranchRow>> {

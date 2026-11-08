@@ -271,5 +271,88 @@ cps clone "http://tester:s3cret@127.0.0.1:$port/private/secret.git" inlinecreds 
 same "$(cd inlinecreds && cps remote)" "origin  http://tester:***@127.0.0.1:$port/private/secret.git  (git)" "and the password is never displayed"
 kill $server_pid 2>/dev/null; trap - EXIT
 
+echo "== shallow clones from a git server"
+cd "$WORK" && rm -rf sh.git shw shc && git init -q --bare sh.git && git clone -q sh.git shw 2>/dev/null && (
+  cd shw && git checkout -qb main
+  for i in 1 2 3 4 5; do echo $i >> f; git add f; git commit -qm "c$i"; done
+  git tag -a v4 -m four HEAD~1 && git tag v5 HEAD && git tag -a v1 -m one HEAD~4 && git push -q origin main --tags
+)
+cps clone --depth 2 sh.git shc >/dev/null 2>&1 && cd shc
+same "$(cps log --format=%s | tr '\n' ' ')" "c5 c4 " "clone --depth 2 brings just the newest two commits"
+same "$(cps tag | awk '{print $1}' | tr '\n' ' ')" "v4 v5 " "with the tags that name them (not v1, whose history wasn't fetched)"
+cps fsck | has "everything is intact" && ok "fsck is happy with the shortened history" || fail "line $LINENO: a step before this check failed"
+cps git-view on >/dev/null && same "$(git log --format=%s | tr '\n' ' ')" "c5 c4 " "the .git view works too: git sees the same shortened history" && git fsck >/dev/null 2>&1 && cps git-view off >/dev/null && ok "and git's fsck accepts it" || fail "line $LINENO: a step before this check failed"
+(cd ../shw && echo 6 >> f && git commit -qam c6 && git push -q origin main)
+cps pull >/dev/null && same "$(cps log --format=%s | tr '\n' ' ')" "c6 c5 c4 " "pull adds new commits and stays shallow"
+echo local > l.txt && cps commit -m mine >/dev/null
+cps fetch --depth 4 >/dev/null && same "$(cps log --format=%s | tr '\n' ' ')" "mine c6 c5 c4 c3 " "fetch --depth deepens it (your own commit moves onto the deeper history)"
+same "$(cps log -n 1 --format=%s v4)" "c4" "tags still name the right commits"
+cps fetch --unshallow >/dev/null && same "$(cps log --format=%s | tr '\n' ' ') $(test -e .copse/shallow && echo shallow || echo full)" "mine c6 c5 c4 c3 c2 c1  full" "fetch --unshallow brings the rest of history"
+cps fsck | has "everything is intact" && ok "and fsck agrees" || fail "line $LINENO: a step before this check failed"
+cps push >/dev/null 2>&1 && git -C ../sh.git fsck --strict >/dev/null 2>&1 && same "$(git -C ../sh.git log --format=%s main | tr '\n' ' ')" "mine c6 c5 c4 c3 c2 c1 " "pushing from it gives git exactly the same history plus your commit" || fail "line $LINENO: a step before this check failed"
+cd "$WORK" && cps clone --depth 1 sh.git sh1 >/dev/null 2>&1 && cd sh1 && echo x > x && cps commit -m "from depth 1" >/dev/null && cps push >/dev/null 2>&1
+same "$(git -C ../sh.git log -n 2 --format=%s main | tr '\n' ' ')" "from depth 1 mine " "a commit made in a depth-1 clone pushes cleanly"
+cd "$WORK"
+
+echo "== partial clones from a git server"
+cd "$WORK" && rm -rf pt.git ptw ptc && git init -q --bare pt.git && git -C pt.git config uploadpack.allowFilter true && git -C pt.git config uploadpack.allowAnySHA1InWant true
+git clone -q pt.git ptw 2>/dev/null && (
+  cd ptw && git checkout -qb main && mkdir d
+  for i in 1 2 3; do echo "v$i" > d/f1; echo "n$i" > d/f$i; seq 1 $((i * 300)) > big; git add -A; git commit -qm "c$i"; done
+  git push -q origin main
+)
+cps clone --filter=blob:none pt.git ptc >/dev/null 2>&1 && cd ptc
+same "$(ls | tr '\n' ' ')$(cps status | tail -1)" "big d Nothing changed." "clone --filter=blob:none checks out the files (fetching only the ones checked out)"
+cps fsck | has "aren't downloaded yet" && ok "older versions stay on the server until they're needed" || fail "line $LINENO: a step before this check failed"
+same "$(cps show HEAD~2:d/f1) $(cps diff HEAD~2 HEAD --stat | tail -1 | sed 's/^ *//')" "n1 4 files changed, 603 insertions(+), 1 deletion(-)" "show and diff fetch old versions when they need them"
+touch -t 202001010000 d/f1 && same "$(cps status | tail -1)" "Nothing changed." "a file named by its git id still compares as unchanged after its time changes"
+echo edit >> d/f2 && cps commit -m local >/dev/null && cps push >/dev/null 2>&1 && git -C ../pt.git fsck --strict >/dev/null 2>&1 && same "$(git -C ../pt.git log -n 1 --format=%s main)" "local" "pushing from it works, and git's fsck --strict agrees" || fail "line $LINENO: a step before this check failed"
+(cd ../ptw && git pull -q origin main 2>/dev/null && echo more >> big && git commit -qam c4 && git push -q origin main)
+cps pull >/dev/null 2>&1 && same "$(tail -1 big)" "more" "pull brings new commits and their files"
+cps gc >/dev/null 2>&1 && cps fsck | has "everything is intact" && ok "gc and fsck work with files named by git ids" || fail "line $LINENO: a step before this check failed"
+cd "$WORK" && git init -q --bare nofilter.git && (cd ptw && git push -q ../nofilter.git main)
+{ cps clone --filter=blob:none nofilter.git nf 2>&1 || true; } | has "doesn't support partial clones" && ok "a server without filters says so" || fail "line $LINENO: a step before this check failed"
+cd "$WORK"
+
+echo "== the older \"dumb\" HTTP protocol (plain files, as cgit serves)"
+cd "$WORK" && rm -rf dumb dumbw && mkdir dumb && git init -q --bare dumb/d.git && git clone -q dumb/d.git dumbw 2>/dev/null && (
+  cd dumbw && git checkout -qb main && mkdir src
+  for i in 1 2 3; do seq 1 $((i * 100)) > src/n.txt; echo "v$i" > v.txt; git add -A; git commit -qm "c$i"; done
+  git tag -a v1 -m "first" HEAD~2 && git push -q origin main --tags
+)
+git -C dumb/d.git gc -q && (cd dumbw && echo 4 >> v.txt && git commit -qam c4 && git push -q origin main)   # some packed, some loose
+git -C dumb/d.git update-server-info
+(cd dumb && exec python3 -u -m http.server 0 --bind 127.0.0.1) > dumb-server.log 2>&1 < /dev/null & dumb_pid=$!
+trap 'kill $dumb_pid 2>/dev/null' EXIT
+for _ in $(seq 100); do dport=$(grep -o 'port [0-9]*' dumb-server.log 2>/dev/null | grep -o '[0-9]*' | head -1 || true); [[ -n "$dport" ]] && break; perl -e 'select(undef,undef,undef,0.1)'; done
+out=$(cps clone "http://127.0.0.1:$dport/d.git" dumbc 2>&1) || fail "$out"
+cd dumbc && same "$(cps log --format=%s | tr '\n' ' ')$(cps tag | awk '{print $1}')" "c4 c3 c2 c1 v1" "clone from a dumb server: packed and loose objects, and tags"
+same "$(cat v.txt | tr '\n' ',') $(wc -l < src/n.txt | tr -d ' ')" "v3,4, 300" "with the files as git has them"
+git init -q --bare ../dumbback.git && cps remote add back ../dumbback.git >/dev/null && cps push back >/dev/null 2>&1
+same "$(git -C ../dumbback.git rev-parse main)" "$(git -C ../dumb/d.git rev-parse main)" "pushed elsewhere, every commit keeps its git id"
+(cd ../dumbw && echo 5 >> v.txt && git commit -qam c5 && git push -q origin main) && git -C ../dumb/d.git update-server-info
+cps pull >/dev/null 2>&1 && same "$(cps log -n 1 --format=%s)" "c5" "pull fetches just what's new"
+{ cps clone --depth 1 "http://127.0.0.1:$dport/d.git" dumbshallow 2>&1 || true; } | has "dumb" && ok "--depth explains that a dumb server can't do it" || fail "line $LINENO: a step before this check failed"
+echo n > n.txt && cps commit -m n >/dev/null && { cps push 2>&1 || true; } | has "can't take pushes" && ok "pushing to it explains that it's read-only" || fail "line $LINENO: a step before this check failed"
+kill $dumb_pid 2>/dev/null; trap - EXIT
+cd "$WORK"
+
+echo "== names and messages that aren't UTF-8"
+export GIT_CONFIG_GLOBAL=/dev/null
+cd "$WORK" && rm -rf l1 l1.git l1back.git && git init -q --bare l1.git && git init -q -b main l1 && (
+  cd l1 && echo hi > ok.txt && okb=$(git hash-object -w ok.txt) && blob=$(echo latin | git hash-object -w --stdin)
+  tree=$(printf "100644 blob $blob\tcaf\xe9.txt\n100644 blob $okb\tok.txt\n" | git mktree)
+  c=$(printf 'R\xe9sum\xe9 du changement\n\nCorps: \xe0 bient\xf4t\n' | git -c i18n.commitEncoding=ISO-8859-1 commit-tree "$tree")
+  git update-ref refs/heads/main "$c" && git push -q ../l1.git main
+)
+cps clone l1.git l1c >/dev/null 2>&1 && cd l1c
+same "$(cps log -n 1 --format=%s)" "Résumé du changement" "a Latin-1 message (with its encoding header) shows as readable text, as git shows it"
+cps fsck | has "everything is intact" && same "$(cps status | tail -1)" "Nothing changed." "a file name that isn't UTF-8 checks out (under a stand-in character on disk) and stays clean" || fail "line $LINENO: a step before this check failed"
+git init -q --bare ../l1back.git && cps remote add back ../l1back.git >/dev/null && cps push back >/dev/null 2>&1
+same "$(git -C ../l1back.git rev-parse main)" "$(git -C ../l1.git rev-parse main)" "pushed back, the commit has the same git id: every byte of the name and message kept"
+echo more > ok.txt && cps commit -m "an edit" >/dev/null && cps push back >/dev/null 2>&1
+git -C ../l1back.git ls-tree main | grep -F '"caf\351.txt"' >/dev/null && git -C ../l1back.git fsck --strict >/dev/null 2>&1 && ok "later commits keep the original bytes of the name, and git's fsck --strict agrees" || fail "line $LINENO: a step before this check failed"
+cd "$WORK"
+
 echo
 echo "All $pass checks passed."

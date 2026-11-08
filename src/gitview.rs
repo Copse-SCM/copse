@@ -87,10 +87,23 @@ pub fn sync(repo: &Repo) -> Result<()> {
     if repo.is_bare() || !is_on(repo) {
         return Ok(());
     }
-    if repo.is_shallow() || repo.is_partial() {
-        bail!("the .git view needs all of history and every file (this is a shallow or partial clone); `copse git-view off` to stop trying");
+    if repo.is_partial() {
+        bail!("the .git view needs every file's contents (this is a partial clone); `copse git-view off` to stop trying");
     }
     let git = git_dir(repo);
+    // A shallow clone: git is told where history stops (.git/shallow), by git id.
+    let shallow = repo.shallow();
+    if shallow.is_empty() {
+        let _ = fs::remove_file(git.join("shallow"));
+    } else {
+        let map = GitMap::load(repo)?;
+        if !map.knows_all(&shallow) {
+            bail!("the .git view needs all of history (this is a shallow clone of a copse repository); `copse fetch --unshallow`, or `copse git-view off`");
+        }
+        let mut lines: Vec<String> = shallow.iter().filter_map(|id| map.git(id)).map(|g| format!("{}\n", hex(&g))).collect();
+        lines.sort();
+        fs::write(git.join("shallow"), lines.concat())?;
+    }
     let tips = tips(repo)?;
 
     // Objects: everything the refs reach that an earlier sync didn't write.

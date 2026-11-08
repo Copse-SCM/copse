@@ -281,9 +281,11 @@ To GitHub, copse looks like any other git client. Commits, authors, emails, time
 | Push 100 changed files | 0.27 s | 0.24 s |
 | Pull 100 changed files | 0.29–0.47 s | 0.36–0.60 s |
 
-**Not yet supported** (see [ROADMAP.md](../ROADMAP.md)):
-- **File names and commit messages that aren't UTF-8.**
-- **Shallow clones from git servers.**
+**Shallow and partial clones** work with git servers too: `copse clone --depth 1 <url>`, `copse fetch --depth N`, `copse fetch --unshallow`, and `copse clone --filter=blob:none <url>` (see below). Tested against GitHub and against git's own server.
+
+**Older servers (cgit):** servers that only offer git's "dumb" protocol (plain files over HTTP, as cgit serves) can be cloned, fetched and pulled from; copse downloads the objects and packs it needs. They're read-only, and have no shallow or partial clones, so copse says so if you ask.
+
+**Names and messages that aren't UTF-8** (from very old repositories, or with an `encoding` header such as Latin-1) round-trip exactly: every byte comes back when pushed, so git ids don't change. Latin-1 messages are shown as readable text, as git shows them. On disk, a byte that isn't valid UTF-8 in a file name appears as a stand-in character (macOS doesn't allow such names), and git still sees the original bytes.
 
 Pushing to github.com is in daily use: copse itself is versioned with copse and pushed to GitHub.
 
@@ -318,7 +320,8 @@ copse pull                                           # get the other machine's w
 - Only tags that point into the fetched history come along.
 - `copse fetch --unshallow` brings the rest.
 - The boundary is kept in `.copse/shallow`. Every history walk (log, merge, gc, fsck) stops there.
-- Shallow clones work between copse repositories. Pushing to a git server needs the full history, because git ids depend on all of it.
+- Shallow clones work with copse repositories and git servers alike. From a git server, `fetch --depth N` deepens the clone; the commits above the old boundary get new copse ids (a copse id depends on its parents'), your branches, tags and own commits move with them, and git ids don't change.
+- A shallow clone of a git server can push to it. A shallow clone of a copse repository can't push to a git server, because git ids depend on all of history.
 
 **How it works:** the client runs `copse serve <path>` on the other end, locally or through `ssh`, and talks to it over stdin/stdout. It sends only the objects the other side is missing, worked out by comparing each new commit's folders with its parent's and skipping unchanged folders entirely. Objects travel exactly as they're stored, already compressed, so there's no recompression. The protocol is described at the top of `src/transport.rs`.
 
@@ -392,7 +395,7 @@ copse push                   # uploads the files' contents to the LFS server, th
 - **Fetched when needed:** older versions are downloaded when something reads them, such as `log -p`, `diff`, checking out an old commit, or a merge.
 - **`fsck`** reports them as not downloaded yet, rather than missing.
 - **Pushing** from a partial clone fetches whatever the other side needs on the way.
-- **Works between copse repositories.** `.copse/promisor` names the remote to fetch from.
+- **Works with copse repositories and git servers.** `.copse/promisor` names the remote to fetch from. From a git server, a file not downloaded yet is named by its git id, and fetched by that id when it's needed (the server must allow filters, as GitHub does).
 
 ## Worktrees and sparse checkout
 
@@ -540,7 +543,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `commit.sh` | 59 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
-| `github.sh` | 94 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user |
+| `github.sh` | 124 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
 | `investigate.sh` | 33 | `blame` (every line compared with `git blame`) and `bisect` |
@@ -565,6 +568,6 @@ The logo lives in `assets/logo/`: the original design, plus versions tuned for e
 ## Not built yet
 
 - **Windows.** copse is built and tested on macOS and Linux only.
-- **Shallow clones from git servers** (`--depth` works between copse repositories).
+- **The `.git` view in partial clones** (it works in shallow ones).
 
 [ROADMAP.md](../ROADMAP.md) has the full list, command by command.

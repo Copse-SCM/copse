@@ -63,6 +63,40 @@ pub fn gitlink_sha(id: &Id) -> [u8; 20] {
     id.as_bytes()[..20].try_into().unwrap()
 }
 
+/// Whether an id is a git id padded with zeros (a submodule's pinned commit, or a
+/// shallow clone's missing parent) rather than a copse id.
+pub fn is_gitlink(id: &Id) -> bool {
+    id.as_bytes()[20..].iter().all(|b| *b == 0)
+}
+
+/// The git id a file's contents would have.
+pub fn git_blob_sha(data: &[u8]) -> [u8; 20] {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(format!("blob {}\0", data.len()).as_bytes());
+    h.update(data);
+    h.finalize().into()
+}
+
+/// The id `data` has as a file, given the id it's expected to have. In a partial
+/// clone of a git server, files whose contents weren't downloaded are named by
+/// their git id (padded); a file matching that git id keeps that name.
+pub fn blob_id_like(expected: &Id, data: &[u8]) -> Id {
+    if is_gitlink(expected) && git_blob_sha(data) == gitlink_sha(expected) {
+        *expected
+    } else {
+        Store::hash(Kind::Blob, data)
+    }
+}
+
+/// Whether `data` is what `id` names.
+pub fn id_matches(id: &Id, kind: Kind, data: &[u8]) -> bool {
+    if kind == Kind::Blob && is_gitlink(id) {
+        return git_blob_sha(data) == gitlink_sha(id);
+    }
+    Store::hash(kind, data) == *id
+}
+
 /// The git commit id a submodule entry pins, as hex.
 pub fn gitlink_hex(id: &Id) -> String {
     gitlink_sha(id).iter().map(|b| format!("{b:02x}")).collect()
@@ -242,7 +276,7 @@ impl Store {
         }
         let data = zstd::stream::decode_all(rest).context("received a corrupt object")?;
         let kind = Kind::from_u8(kind)?;
-        if Self::hash(kind, &data) != *id {
+        if !id_matches(id, kind, &data) {
             bail!("received object {} does not match its id", short(id));
         }
         // A folder listing is checked before it's kept: names like ".." or ".copse",
@@ -528,7 +562,11 @@ impl Store {
             (kind, Self::hash(kind, &data))
         };
         if actual != *id {
-            bail!("its content doesn't match its id");
+            // A partial clone of a git server names some files by their git id.
+            let git_named = kind == Kind::Blob && is_gitlink(id) && id_matches(id, kind, &self.get(id)?.1);
+            if !git_named {
+                bail!("its content doesn't match its id");
+            }
         }
         Ok(kind)
     }
@@ -933,5 +971,99 @@ mod name_tests {
         assert!(decode_tree(&dotdot).is_err());
         let twice = encode_tree(&[TreeEntry { name: "x".into(), mode: Mode::Link, id }, TreeEntry { name: "x".into(), mode: Mode::Dir, id }]);
         assert!(decode_tree(&twice).err().map(|e| e.to_string()).unwrap_or_default().contains("twice"));
+    }
+}
+
+// ---------------------------------------------------------------- bytes that aren't UTF-8
+
+/// The first of 128 private-use characters that stand in for bytes that aren't
+/// valid UTF-8 (0x80..=0xFF) in names and messages from git. They turn back into
+/// exactly those bytes going to git, so ids are unchanged. (In a file name on
+/// disk the stand-in character is used, since macOS doesn't allow invalid UTF-8.)
+const STAND_IN: u32 = 0x10FF00;
+
+/// Text from git, keeping every byte: valid UTF-8 as it is, other bytes as stand-ins.
+pub fn from_git_bytes(mut b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len());
+    loop {
+        match std::str::from_utf8(b) {
+            Ok(s) => {
+                out.push_str(s);
+                return out;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                out.push_str(std::str::from_utf8(&b[..good]).unwrap());
+                let bad = e.error_len().unwrap_or(b.len() - good);
+                for &byte in &b[good..good + bad] {
+                    out.push(char::from_u32(STAND_IN + byte as u32).unwrap());
+                }
+                b = &b[good + bad..];
+            }
+        }
+    }
+}
+
+/// The bytes git had: stand-ins back to the bytes they stand for.
+pub fn to_git_bytes(s: &str) -> Vec<u8> {
+    if !s.chars().any(|c| (STAND_IN + 0x80..=STAND_IN + 0xFF).contains(&(c as u32))) {
+        return s.as_bytes().to_vec();
+    }
+    let mut out = Vec::with_capacity(s.len());
+    let mut buf = [0u8; 4];
+    for c in s.chars() {
+        let n = c as u32;
+        if (STAND_IN + 0x80..=STAND_IN + 0xFF).contains(&n) {
+            out.push((n - STAND_IN) as u8);
+        } else {
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    out
+}
+
+/// Text with stand-ins made readable: decoded as Latin-1 when the commit says
+/// that's its encoding (as git converts messages for display), otherwise shown as
+/// U+FFFD. Text without stand-ins is returned as it is.
+pub fn readable(text: &str, extra: &[u8]) -> String {
+    let is_stand_in = |c: char| (STAND_IN + 0x80..=STAND_IN + 0xFF).contains(&(c as u32));
+    if !text.chars().any(is_stand_in) {
+        return text.to_string();
+    }
+    let encoding = String::from_utf8_lossy(extra)
+        .lines()
+        .find_map(|l| l.strip_prefix("encoding ").map(|e| e.trim().to_ascii_lowercase()))
+        .unwrap_or_default();
+    let latin1 = matches!(encoding.as_str(), "iso-8859-1" | "iso8859-1" | "latin1" | "latin-1" | "iso-8859-15" | "windows-1252" | "cp1252");
+    text.chars()
+        .map(|c| match c {
+            c if is_stand_in(c) && latin1 => char::from_u32(c as u32 - STAND_IN).unwrap_or('\u{FFFD}'),
+            c if is_stand_in(c) => '\u{FFFD}',
+            c => c,
+        })
+        .collect()
+}
+
+impl Commit {
+    /// A copy to show people: message and names readable (see [`readable`]).
+    pub fn for_display(mut self) -> Commit {
+        self.message = readable(&self.message, &self.extra);
+        self.author.who = readable(&self.author.who, &self.extra);
+        self.committer.who = readable(&self.committer.who, &self.extra);
+        self
+    }
+}
+
+#[cfg(test)]
+mod bytes_tests {
+    use super::{from_git_bytes, to_git_bytes};
+
+    #[test]
+    fn invalid_utf8_round_trips() {
+        for b in [&b"plain"[..], b"caf\xe9", b"\xff\xfe\x00x", "naïve ü".as_bytes(), b"\xe2\x82", b"a\xc3"] {
+            let s = from_git_bytes(b);
+            assert_eq!(to_git_bytes(&s), b, "{b:?}");
+        }
+        assert_eq!(from_git_bytes(b"ok"), "ok");
     }
 }

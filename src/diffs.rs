@@ -286,7 +286,7 @@ pub fn show(rev: Option<&str>, stat: bool) -> Result<()> {
     }
 
     let id = repo.resolve(rev)?;
-    let c = repo.read_commit(&id)?;
+    let c = repo.read_commit(&id)?.for_display();
     let mut labels: HashMap<Id, Vec<String>> = HashMap::new();
     for (name, bid) in repo.branches()?.into_iter().chain(repo.tracking_refs()?) {
         labels.entry(bid).or_default().push(name);

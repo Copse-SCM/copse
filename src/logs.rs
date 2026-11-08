@@ -269,6 +269,7 @@ pub fn log(args: LogArgs) -> Result<()> {
             }
         }
         shown += 1;
+        let c = c.for_display();
 
         let parents: Vec<Id> = if args.first_parent { c.parents.iter().take(1).copied().collect() } else { c.parents.clone() };
         let (before, row, after, rail) = match graph.as_mut() {

@@ -75,7 +75,7 @@ same "$(cps log --oneline -n 100 | wc -l | tr -d ' ')" "12" "giving all of histo
 same "$(tags)" "ancient,v0.5,v1.0,v1.1" "tags from the older history arrive too"
 expect_fail "--unshallow on a full repository is explained" "isn't shallow" cps fetch --unshallow
 mkdir ../gitsrc && cd ../gitsrc && git init -q -b main && echo x > x && git add x && git -c user.name=a -c user.email=b commit -qm x && cd ..
-expect_fail "--depth with a git server says it isn't supported yet" "copse remotes" cps clone --depth 1 "$WORK/gitsrc/.git" gitshallow
+cps clone --depth 1 "$WORK/gitsrc/.git" gitshallow >/dev/null 2>&1 && same "$(cd gitshallow && cps log --oneline | wc -l | tr -d ' ')" "1" "--depth works with git servers too (more in tests/github.sh)"
 cd "$WORK"
 
 echo "== sparse checkout"

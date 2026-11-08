@@ -24,7 +24,8 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 **Known limits of the git bridge:**
 - **Submodules** round-trip exactly (git's 160000 entries and `.gitmodules`); `copse submodule update --init` checks them out.
 - **Signed commits** (SSH or GPG) verify on git and GitHub. Rebased and amended commits lose their signature unless signed again; git behaves the same.
-- **File names and commit messages that aren't UTF-8** are refused with a clear message (rare outside very old repositories).
+- **File names and commit messages that aren't UTF-8** round-trip byte for byte (same git ids); Latin-1 messages display readably.
+- **Older "dumb" HTTP servers** (cgit): clone, fetch and pull (read-only by nature). Tested against git.symlinx.net (cgit): four repositories cloned with identical files and git ids.
 - **Tags** travel to and from git servers (lightweight and annotated, exact round trips), and between copse repositories.
 - **Pulling is faster than git's**: a fast-forward checks and writes only the files that changed (about 30 ms against git's 135 ms for a small pull in a 50,000-file repository).
 - **Signed commits** pushed to github.com show as Verified (tested 2026-11-07). Pushing over SSH to github.com is untested (this machine's SSH key isn't registered with GitHub).
@@ -74,10 +75,10 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | Clone, fetch, pull (`--rebase`) from GitHub and other git servers | ✅ | Section 1, step 3 |
 | SSH and HTTPS to git servers, with git's saved logins | ✅ | Section 1, step 4 |
 | Delete a remote branch (`push --delete`) | ✅ | git servers and copse remotes; fetch tidies away deleted branches |
-| Shallow clone (`--depth`, `--unshallow`) | ✅ | Between copse repositories; not yet from git servers |
+| Shallow clone (`--depth`, `--unshallow`) | ✅ | Copse repositories and git servers (deepening, unshallowing, pushing from one); checked against GitHub |
 | Worktrees | ✅ | `add`, `list`, `remove`, `prune`; one branch per worktree |
 | Sparse checkout | ✅ | Folder-based (like git's cone mode), per worktree |
-| Partial clone (`--filter=blob:none`) | ✅ | Between copse repositories; file contents fetched when needed |
+| Partial clone (`--filter=blob:none`) | ✅ | Copse repositories and git servers (contents fetched by git id when needed); checked against GitHub |
 | Submodules | ✅ | Round trip with git, `submodule status/update/add`, `clone --recurse-submodules` |
 
 ### Storage, configuration and platform

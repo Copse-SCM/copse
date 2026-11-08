@@ -63,6 +63,24 @@ impl Http {
             self.base = split_userinfo(base).0;
         }
         if resp.content_type() != format!("application/x-git-{}-advertisement", self.service) {
+            // An older "dumb" server (plain files, e.g. cgit): its branch list is plain text.
+            // (Plain web servers label it text/plain or application/octet-stream.)
+            if self.service == "receive-pack" && matches!(resp.content_type(), "text/plain" | "application/octet-stream" | "") {
+                bail!("{} only serves plain files (git's read-only \"dumb\" protocol), so it can't take pushes; push over SSH, or to a server that speaks git's smart protocol", redact(&self.base));
+            }
+            if self.service == "upload-pack" && matches!(resp.content_type(), "text/plain" | "application/octet-stream" | "") {
+                let mut body = String::new();
+                resp.into_reader().take(64 << 20).read_to_string(&mut body)?;
+                if let Some(refs) = parse_dumb_refs(&body) {
+                    let mut caps: HashSet<String> = ["dumb".to_string()].into();
+                    if let Some(head) = self.get_maybe("HEAD")? {
+                        if let Some(b) = String::from_utf8_lossy(&head).trim().strip_prefix("ref: refs/heads/") {
+                            caps.insert(format!("symref=HEAD:refs/heads/{b}"));
+                        }
+                    }
+                    return Ok((refs, caps));
+                }
+            }
             bail!("{} doesn't look like a git repository (check the address)", redact(&self.base));
         }
         let mut body = Vec::new();
@@ -76,6 +94,27 @@ impl Http {
             bail!("unexpected reply from the git server");
         }
         read_advertisement(&mut r)
+    }
+
+    /// A file from a "dumb" server (objects, packs, HEAD), or None if it isn't there.
+    pub fn get_maybe(&mut self, path: &str) -> Result<Option<Vec<u8>>> {
+        let url = format!("{}/{path}", self.base);
+        let result = self.send(|agent, auth| {
+            let mut req = agent.get(&url);
+            if let Some(a) = auth {
+                req = req.set("Authorization", a);
+            }
+            req.call()
+        });
+        match result {
+            Ok(resp) => {
+                let mut body = Vec::new();
+                resp.into_reader().take(4 << 30).read_to_end(&mut body)?;
+                Ok(Some(body))
+            }
+            Err(e) if e.to_string().contains("(404)") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Send a whole request (wants and haves, or commands and a pack) and return
@@ -143,6 +182,23 @@ impl Http {
             "read this repository"
         }
     }
+}
+
+/// A dumb server's info/refs: "<id>\t<ref>" per line. None if it isn't that.
+fn parse_dumb_refs(body: &str) -> Option<Vec<(String, GitId)>> {
+    let mut refs = Vec::new();
+    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+        let (id, name) = line.split_once('\t')?;
+        if id.len() != 40 {
+            return None;
+        }
+        let mut g = [0u8; 20];
+        for (i, b) in g.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&id[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        refs.push((name.trim().to_string(), g));
+    }
+    Some(refs)
 }
 
 /// `https://user:token@host/path` -> (`https://host/path`, those credentials).

@@ -47,7 +47,7 @@ pub fn list() -> Result<()> {
 const GIT_PREFIX: &str = "git::";
 
 /// The address of a git (not copse) remote, if this is one.
-fn git_url(stored: &str) -> Option<&str> {
+pub fn git_url(stored: &str) -> Option<&str> {
     stored.strip_prefix(GIT_PREFIX)
 }
 
@@ -139,10 +139,7 @@ fn fetch_all(repo: &Repo, remote: &str, depth: Depth) -> Result<RemoteRefs> {
     let url = repo.remote_url(remote)?;
     let refs = match git_url(&url) {
         Some(git) => {
-            if depth != Depth::Full {
-                bail!("--depth and --unshallow work with copse remotes; shallow clones from git servers aren't supported yet");
-            }
-            crate::gitimport::fetch(repo, git)?
+            crate::gitimport::fetch(repo, git, depth)?
         }
         None => {
             let mut conn = Conn::open(&url)?;
@@ -474,9 +471,6 @@ pub fn clone(url: &str, dir: Option<PathBuf>, depth: Option<usize>, recurse: boo
         let stored = if is_git { format!("{GIT_PREFIX}{url}") } else { url.clone() };
         repo.save_remotes(&[("origin".to_string(), stored)])?;
         if filter.is_some() {
-            if is_git {
-                bail!("--filter works with copse remotes; partial clones from git servers aren't supported yet");
-            }
             fs::write(repo.dir.join("promisor"), "origin\n")?;
         }
         let repo = Repo::open_path(&dir)?; // reopened, so it fetches missing file contents from origin

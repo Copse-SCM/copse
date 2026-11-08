@@ -73,6 +73,16 @@ impl Repo {
         let Ok(remote) = fs::read_to_string(self.dir.join("promisor")) else { return };
         let Ok(url) = self.remote_url(remote.trim()) else { return };
         let label = remote.trim().to_string();
+        if let Some(git) = crate::remote::git_url(&url).map(str::to_string) {
+            // A git server: contents are fetched by their git ids.
+            self.store.set_promisor(std::sync::Arc::new(move |store: &Store, ids: &[Id]| {
+                if ids.len() > 1 && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                    eprintln!("Fetching {} file(s) from {label}...", ids.len());
+                }
+                crate::gitimport::fetch_blobs(store, &git, ids).with_context(|| format!("fetching file contents from {label} (this is a partial clone)"))
+            }));
+            return;
+        }
         self.store.set_promisor(std::sync::Arc::new(move |store: &Store, ids: &[Id]| {
             if ids.len() > 1 && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                 eprintln!("Fetching {} file(s) from {label}...", ids.len());

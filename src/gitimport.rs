@@ -23,7 +23,9 @@ use std::sync::Arc;
 const LOOSE_LIMIT: usize = 500;
 
 /// Fetch every branch of a git server. Returns its branches as copse commit ids.
-pub fn fetch(repo: &Repo, url: &str) -> Result<RemoteRefs> {
+/// `depth` makes or deepens a shallow clone (git's `deepen`).
+pub fn fetch(repo: &Repo, url: &str, depth: crate::remote::Depth) -> Result<RemoteRefs> {
+    use crate::remote::Depth;
     let mut session = Session::open(url, "upload-pack")?;
     let (refs, caps) = session.advertisement()?;
     let head = caps.iter().find_map(|c| c.strip_prefix("symref=HEAD:refs/heads/")).map(str::to_string);
@@ -38,15 +40,50 @@ pub fn fetch(repo: &Repo, url: &str) -> Result<RemoteRefs> {
 
     let mut map = GitMap::load(repo)?;
     let have = |g: &GitId, map: &GitMap| map.copse(g).map_or(false, |t| repo.store.contains(&t));
+
+    // Shallow clones: the commits whose parents we don't have, as git ids.
+    let shallow_now = repo.shallow();
+    if depth == Depth::Unshallow && shallow_now.is_empty() {
+        bail!("this repository isn't shallow; it already has all of history");
+    }
+    let shallow_git: Vec<GitId> = shallow_now.iter().filter_map(|id| map.git(id)).collect();
+    let deepen = match depth {
+        Depth::Last(n) => Some(n.max(1)),
+        Depth::Unshallow => Some(2_147_483_647), // what git sends for --unshallow
+        Depth::Full => None,
+    };
+    // A shallow fetch takes branches only; tags come along if they name history that
+    // arrived (include-tag), as git does.
+    let shallow_mode = matches!(depth, Depth::Last(_)) || (!shallow_now.is_empty() && depth != Depth::Unshallow);
+    if (deepen.is_some() || !shallow_git.is_empty()) && !caps.contains("shallow") {
+        bail!("this git server doesn't support shallow clones; clone without --depth");
+    }
     let mut wants = Vec::new();
     let mut asked = HashSet::new();
-    for (_, g) in branches.iter().chain(&tags) {
-        if !have(g, &map) && asked.insert(*g) {
+    let wanted: Vec<&(String, GitId)> = if shallow_mode { branches.iter().collect() } else { branches.iter().chain(&tags).collect() };
+    for (_, g) in wanted {
+        // Deepening asks again for tips we already have, so the server walks from them.
+        if (deepen.is_some() || !have(g, &map)) && asked.insert(*g) {
             wants.push(*g);
         }
     }
+    let (mut new_shallow, mut unshallowed) = (HashSet::new(), HashSet::new());
+    let dumb = caps.contains("dumb");
+    if dumb && (deepen.is_some() || !shallow_git.is_empty() || repo.is_partial()) {
+        bail!("this git server only serves plain files (the \"dumb\" protocol), which has no shallow or partial clones; clone without --depth or --filter");
+    }
+    // A partial clone asks for commits and folders only; file contents come later.
+    let partial = repo.is_partial();
+    if partial && !caps.contains("filter") {
+        bail!("this git server doesn't support partial clones (filters); clone without --filter");
+    }
 
-    if !wants.is_empty() {
+    if dumb && !wants.is_empty() {
+        let h = session.http().context("internal error: a dumb server over something other than HTTP")?;
+        let objects = dumb_objects(h, &wants, |g| have(g, &map))?;
+        let count = import_objects(repo, &mut map, &objects, &HashSet::new(), false)?;
+        println!("Received {count} objects");
+    } else if !wants.is_empty() {
         let mut ask = Vec::new();
         if caps.contains("ofs-delta") && std::env::var_os("COPSE_NO_OFS_DELTA").is_none() {
             ask.push("ofs-delta");
@@ -54,10 +91,28 @@ pub fn fetch(repo: &Repo, url: &str) -> Result<RemoteRefs> {
         if caps.contains("no-progress") && !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
             ask.push("no-progress"); // nobody is watching: don't print the server's progress
         }
+        if deepen.is_some() || !shallow_git.is_empty() {
+            ask.push("shallow");
+        }
+        if partial {
+            ask.push("filter");
+        }
+        if shallow_mode && caps.contains("include-tag") {
+            ask.push("include-tag");
+        }
         ask.push("agent=copse/0.1");
         let mut request = pkt(format!("want {} {}\n", hex(&wants[0]), ask.join(" ")).as_bytes());
         for w in &wants[1..] {
             request.extend(pkt(format!("want {}\n", hex(w)).as_bytes()));
+        }
+        for g in &shallow_git {
+            request.extend(pkt(format!("shallow {}\n", hex(g)).as_bytes()));
+        }
+        if let Some(d) = deepen {
+            request.extend(pkt(format!("deepen {d}\n").as_bytes()));
+        }
+        if partial {
+            request.extend(pkt(b"filter blob:none\n"));
         }
         request.extend_from_slice(FLUSH);
         // What we already have, so the server leaves it out.
@@ -70,33 +125,31 @@ pub fn fetch(repo: &Repo, url: &str) -> Result<RemoteRefs> {
         request.extend(pkt(b"done\n"));
         let mut reply = session.exchange(&request)?;
 
-        // The server acknowledges what we have (NAK, or one ACK per common commit; how
-        // many depends on the git version), then sends the pack, which starts "PACK".
-        let mut pack = Vec::new();
-        loop {
-            let mut head = [0u8; 4];
-            reply.read_exact(&mut head).context("the git server hung up before sending anything")?;
-            if &head == b"PACK" {
-                pack.extend_from_slice(&head);
-                reply.read_to_end(&mut pack)?;
-                break;
-            }
-            let len = std::str::from_utf8(&head).ok().and_then(|h| usize::from_str_radix(h, 16).ok());
-            let len = len.with_context(|| format!("unexpected reply from the git server: {:?}", String::from_utf8_lossy(&head)))?;
-            if len < 4 {
-                continue; // a flush packet
-            }
-            let mut line = vec![0u8; len - 4];
-            reply.read_exact(&mut line)?;
-            if !(line.starts_with(b"ACK") || line.starts_with(b"NAK")) {
-                bail!("unexpected reply from the git server: {}", String::from_utf8_lossy(&line).trim_end());
-            }
-        }
+        let (pack, sh, unsh) = read_reply(&mut reply)?;
+        new_shallow.extend(sh);
+        unshallowed.extend(unsh);
         drop(reply);
-        let count = import_pack(repo, &mut map, &pack)?;
+        let count = import_pack(repo, &mut map, &pack, &new_shallow, partial)?;
         println!("Received {count} objects ({})", human(pack.len() as u64));
     }
     drop(session);
+
+    // Where history now stops: commits that got their parents leave the list, the
+    // server's new boundary joins it, and commits above the old boundary are
+    // renumbered (their copse ids depend on their parents').
+    if deepen.is_some() || !new_shallow.is_empty() || !unshallowed.is_empty() {
+        let mut set: HashSet<Id> = if depth == Depth::Unshallow { HashSet::new() } else { shallow_now.clone() };
+        set.retain(|id| map.git(id).map_or(true, |g| !unshallowed.contains(&g)));
+        set.extend(new_shallow.iter().filter_map(|g| map.copse(g)));
+        let renumbered = if unshallowed.is_empty() && depth != Depth::Unshallow { HashMap::new() } else { renumber(repo, &mut map)? };
+        let set: HashSet<Id> = set.into_iter().map(|id| *renumbered.get(&id).unwrap_or(&id)).collect();
+        if set != repo.shallow() {
+            repo.set_shallow(&set)?;
+        }
+        if depth == Depth::Unshallow {
+            println!("All of history is here now; this is no longer a shallow clone.");
+        }
+    }
 
     // Tags become local tags, as with git. Yours are never overwritten.
     for (name, g) in tags {
@@ -121,6 +174,258 @@ pub fn fetch(repo: &Repo, url: &str) -> Result<RemoteRefs> {
         out.push((branch, copse));
     }
     Ok(RemoteRefs { head, branches: out, tags: Vec::new(), tag_targets: Vec::new() }) // tags were already made local above
+}
+
+/// Deeper history arrived for a shallow clone: commits that held their missing
+/// parents as git ids get the real ones, and every commit after them is rebuilt
+/// with its parents' new ids (copse ids depend on parents). Branches, remote
+/// branches, tags and a detached HEAD move to the new ids; git ids don't change.
+/// Returns old id -> new id.
+fn renumber(repo: &Repo, map: &mut GitMap) -> Result<HashMap<Id, Id>> {
+    use crate::objects::{gitlink_sha, is_gitlink};
+    let mut tips: Vec<Id> = repo.branches()?.into_iter().map(|(_, id)| id).collect();
+    tips.extend(repo.tracking_refs()?.into_iter().map(|(_, id)| id));
+    for (_, id) in repo.tags()? {
+        tips.extend(repo.peel(id).ok());
+    }
+    tips.extend(repo.head_commit()?);
+    // Every commit they reach, parents first (as stored: shallow ones keep their parents).
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack: Vec<(Id, bool)> = tips.into_iter().map(|t| (t, false)).collect();
+    while let Some((id, expanded)) = stack.pop() {
+        if expanded {
+            order.push(id);
+            continue;
+        }
+        if is_gitlink(&id) || !repo.store.contains(&id) || !seen.insert(id) {
+            continue;
+        }
+        stack.push((id, true));
+        for p in repo.read_commit_raw(&id)?.parents.iter().rev() {
+            stack.push((*p, false));
+        }
+    }
+    let mut renumbered: HashMap<Id, Id> = HashMap::new();
+    for id in order {
+        let c = repo.read_commit_raw(&id)?;
+        let parents: Vec<Id> = c
+            .parents
+            .iter()
+            .map(|p| if is_gitlink(p) { map.copse(&gitlink_sha(p)).filter(|c| repo.store.contains(c)).unwrap_or(*p) } else { *renumbered.get(p).unwrap_or(p) })
+            .collect();
+        if parents != c.parents {
+            let mut n = c.clone();
+            n.parents = parents;
+            let new_id = repo.store.put(Kind::Commit, &n.encode())?;
+            if let Some(g) = map.git(&id) {
+                map.replace(new_id, g);
+            }
+            renumbered.insert(id, new_id);
+        }
+    }
+    if renumbered.is_empty() {
+        return Ok(renumbered);
+    }
+    map.save()?;
+    for (name, id) in repo.branches()? {
+        if let Some(n) = renumbered.get(&id) {
+            repo.set_branch(&name, n)?;
+        }
+    }
+    for (full, id) in repo.tracking_refs()? {
+        if let (Some(n), Some((remote, branch))) = (renumbered.get(&id), full.split_once('/')) {
+            repo.set_tracking(remote, branch, n)?;
+        }
+    }
+    for (name, id) in repo.tags()? {
+        if let Some(n) = renumbered.get(&id) {
+            repo.set_tag(&name, n)?;
+        } else if let Ok((Kind::Tag, data)) = repo.store.get(&id) {
+            let mut t = Tag::decode(&data)?;
+            if let Some(n) = renumbered.get(&t.object) {
+                t.object = *n;
+                let new_tag = repo.store.put(Kind::Tag, &t.encode())?;
+                if let Some(g) = map.git(&id) {
+                    map.replace(new_tag, g);
+                }
+                repo.set_tag(&name, &new_tag)?;
+            }
+        }
+    }
+    if let crate::repo::Head::Detached(id) = repo.head()? {
+        if let Some(n) = renumbered.get(&id) {
+            repo.set_head(&crate::repo::Head::Detached(*n))?;
+        }
+    }
+    map.save()?;
+    Ok(renumbered)
+}
+
+/// The server's reply to a fetch: shallow lines (where history now stops), its
+/// acknowledgements, then the pack, which starts "PACK".
+fn read_reply(reply: &mut dyn Read) -> Result<(Vec<u8>, HashSet<GitId>, HashSet<GitId>)> {
+    let (mut shallow, mut unshallow) = (HashSet::new(), HashSet::new());
+    let mut pack = Vec::new();
+    loop {
+        let mut head = [0u8; 4];
+        reply.read_exact(&mut head).context("the git server hung up before sending anything")?;
+        if &head == b"PACK" {
+            pack.extend_from_slice(&head);
+            reply.read_to_end(&mut pack)?;
+            return Ok((pack, shallow, unshallow));
+        }
+        let len = std::str::from_utf8(&head).ok().and_then(|h| usize::from_str_radix(h, 16).ok());
+        let len = len.with_context(|| format!("unexpected reply from the git server: {:?}", String::from_utf8_lossy(&head)))?;
+        if len < 4 {
+            continue; // a flush packet
+        }
+        let mut line = vec![0u8; len - 4];
+        reply.read_exact(&mut line)?;
+        if let Some(g) = line.strip_prefix(b"shallow ") {
+            shallow.insert(parse_git_id(String::from_utf8_lossy(g).trim())?);
+        } else if let Some(g) = line.strip_prefix(b"unshallow ") {
+            unshallow.insert(parse_git_id(String::from_utf8_lossy(g).trim())?);
+        } else if let Some(err) = line.strip_prefix(b"ERR ") {
+            bail!("the git server refused: {}", String::from_utf8_lossy(err).trim_end());
+        } else if !(line.starts_with(b"ACK") || line.starts_with(b"NAK")) {
+            bail!("unexpected reply from the git server: {}", String::from_utf8_lossy(&line).trim_end());
+        }
+    }
+}
+
+/// A partial clone of a git server: fetch these files' contents (named by their git
+/// ids) and store them under those names.
+pub fn fetch_blobs(store: &Store, url: &str, ids: &[Id]) -> Result<()> {
+    use crate::objects::{gitlink_sha, is_gitlink};
+    let mut wants = Vec::new();
+    for id in ids {
+        if !is_gitlink(id) {
+            bail!("{} isn't a file from the git server, so it can't be fetched from there", crate::objects::short(id));
+        }
+        wants.push(gitlink_sha(id));
+    }
+    if wants.is_empty() {
+        return Ok(());
+    }
+    let mut session = Session::open(url, "upload-pack")?;
+    let (_, caps) = session.advertisement()?;
+    let mut ask = vec!["no-progress", "agent=copse/0.1"];
+    if caps.contains("ofs-delta") {
+        ask.push("ofs-delta");
+    }
+    let mut request = pkt(format!("want {} {}\n", hex(&wants[0]), ask.join(" ")).as_bytes());
+    for w in &wants[1..] {
+        request.extend(pkt(format!("want {}\n", hex(w)).as_bytes()));
+    }
+    request.extend_from_slice(FLUSH);
+    request.extend(pkt(b"done\n"));
+    let mut reply = session.exchange(&request)?;
+    let (pack, _, _) = read_reply(&mut reply)?;
+    drop(reply);
+    let (objects, _) = read_pack(&pack)?;
+    for w in &wants {
+        let Some((3, data)) = objects.get(w).map(|(k, d)| (*k, d)) else {
+            bail!("the git server didn't send the file {}", hex(w));
+        };
+        store.put_with_id(&crate::objects::gitlink_id(w), Kind::Blob, data)?;
+    }
+    Ok(())
+}
+
+/// A "dumb" server (plain files over HTTP, as cgit serves): walk from `wants`,
+/// downloading each object loose, or the pack holding it, until reaching what we
+/// already have.
+fn dumb_objects(h: &mut crate::githttp::Http, wants: &[GitId], have: impl Fn(&GitId) -> bool) -> Result<HashMap<GitId, (u8, Arc<Vec<u8>>)>> {
+    let mut objects: HashMap<GitId, (u8, Arc<Vec<u8>>)> = HashMap::new();
+    let mut packs: Option<Vec<(String, HashSet<GitId>)>> = None; // not downloaded yet: name, ids
+    let mut queue: Vec<GitId> = wants.to_vec();
+    let mut walked = HashSet::new();
+    while let Some(g) = queue.pop() {
+        if have(&g) || !walked.insert(g) {
+            continue;
+        }
+        if !objects.contains_key(&g) {
+            let x = hex(&g);
+            if let Some(z) = h.get_maybe(&format!("objects/{}/{}", &x[..2], &x[2..]))? {
+                let (kind, data) = loose_object(&z).with_context(|| format!("object {x} from the server"))?;
+                if git_hash(type_name(kind)?, &data) != g {
+                    bail!("object {x} from the server doesn't match its id");
+                }
+                objects.insert(g, (kind, Arc::new(data)));
+            } else {
+                // Not loose: find the pack that has it.
+                if packs.is_none() {
+                    let list = h.get_maybe("objects/info/packs")?.unwrap_or_default();
+                    let mut found = Vec::new();
+                    for line in String::from_utf8_lossy(&list).lines() {
+                        if let Some(name) = line.strip_prefix("P ").map(str::trim).and_then(|n| n.strip_suffix(".pack")) {
+                            let idx = h.get_maybe(&format!("objects/pack/{name}.idx"))?.with_context(|| format!("the server lists {name}.pack but has no index for it"))?;
+                            found.push((name.to_string(), pack_index_ids(&idx)?));
+                        }
+                    }
+                    packs = Some(found);
+                }
+                let list = packs.as_mut().unwrap();
+                let at = list.iter().position(|(_, ids)| ids.contains(&g)).with_context(|| format!("the server is missing object {x}"))?;
+                let (name, _) = list.remove(at);
+                let pack = h.get_maybe(&format!("objects/pack/{name}.pack"))?.with_context(|| format!("the server is missing {name}.pack"))?;
+                let (from_pack, _) = read_pack(&pack)?;
+                objects.extend(from_pack);
+            }
+        }
+        // What it leads to.
+        let (kind, data) = objects.get(&g).map(|(k, d)| (*k, d.clone())).context("internal error: object vanished")?;
+        match kind {
+            1 => {
+                let c = parse_commit(&data, &g)?;
+                queue.push(c.tree);
+                queue.extend(c.parents);
+            }
+            2 => queue.extend(parse_tree(&data)?.into_iter().filter(|(mode, _, _)| mode.as_slice() != b"160000").map(|(_, _, id)| id)),
+            4 => queue.push(parse_tag(&data, &g)?.object),
+            _ => {}
+        }
+    }
+    // Only what the walk reached (a pack may hold more).
+    objects.retain(|g, _| walked.contains(g));
+    Ok(objects)
+}
+
+/// A loose git object: zlib("TYPE SIZE\0" + content).
+fn loose_object(z: &[u8]) -> Result<(u8, Vec<u8>)> {
+    let mut raw = Vec::new();
+    flate2::read::ZlibDecoder::new(z).read_to_end(&mut raw).context("can't be decompressed")?;
+    let nul = raw.iter().position(|b| *b == 0).context("malformed")?;
+    let header = std::str::from_utf8(&raw[..nul]).context("malformed")?;
+    let (ty, size) = header.split_once(' ').context("malformed")?;
+    let kind = match ty {
+        "commit" => 1,
+        "tree" => 2,
+        "blob" => 3,
+        "tag" => 4,
+        _ => bail!("unknown object type {ty}"),
+    };
+    let data = raw[nul + 1..].to_vec();
+    if size.parse::<usize>().ok() != Some(data.len()) {
+        bail!("its size doesn't match");
+    }
+    Ok((kind, data))
+}
+
+/// The ids in a git pack index (version 1 or 2).
+fn pack_index_ids(idx: &[u8]) -> Result<HashSet<GitId>> {
+    let v2 = idx.starts_with(b"\xfftOc");
+    let fan = if v2 { 8 } else { 0 };
+    let n = idx.get(fan + 255 * 4..fan + 256 * 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()) as usize).context("damaged pack index")?;
+    let start = fan + 256 * 4;
+    let mut ids = HashSet::with_capacity(n);
+    for i in 0..n {
+        let at = if v2 { start + i * 20 } else { start + i * 24 + 4 };
+        let id: GitId = idx.get(at..at + 20).context("damaged pack index")?.try_into().unwrap();
+        ids.insert(id);
+    }
+    Ok(ids)
 }
 
 // ---------------------------------------------------------------- git's pack format
@@ -365,8 +670,9 @@ fn parse_signature(s: &str) -> Result<Signature> {
 fn parse_commit(data: &[u8], id: &GitId) -> Result<ParsedCommit> {
     let split = data.windows(2).position(|w| w == b"\n\n").with_context(|| format!("commit {} is malformed", hex(id)))?;
     let (header, message) = (&data[..split], &data[split + 2..]);
-    let header = std::str::from_utf8(header).map_err(|_| anyhow!("commit {} has a header that isn't UTF-8 (not supported yet)", hex(id)))?;
-    let message = String::from_utf8(message.to_vec()).map_err(|_| anyhow!("commit {} has a message that isn't UTF-8 (not supported yet)", hex(id)))?;
+    // Bytes that aren't UTF-8 (old encodings) are kept as stand-ins, so they round-trip.
+    let header = crate::objects::from_git_bytes(header);
+    let message = crate::objects::from_git_bytes(message);
     let (mut tree, mut parents, mut author, mut committer) = (None, Vec::new(), None, None);
     let mut extra = Vec::new();
     let mut last_was_extra = false;
@@ -376,7 +682,7 @@ fn parse_commit(data: &[u8], id: &GitId) -> Result<ParsedCommit> {
             if !last_was_extra {
                 bail!("commit {} has an unexpected continuation line", hex(id));
             }
-            extra.extend_from_slice(line.as_bytes());
+            extra.extend_from_slice(&crate::objects::to_git_bytes(line));
             extra.push(b'\n');
             continue;
         }
@@ -389,7 +695,7 @@ fn parse_commit(data: &[u8], id: &GitId) -> Result<ParsedCommit> {
             "committer" => committer = Some(parse_signature(value)?),
             _ => {
                 // encoding, gpgsig, mergetag...: kept verbatim so the commit round-trips.
-                extra.extend_from_slice(line.as_bytes());
+                extra.extend_from_slice(&crate::objects::to_git_bytes(line));
                 extra.push(b'\n');
                 last_was_extra = true;
             }
@@ -417,14 +723,13 @@ struct ParsedTag {
 
 fn parse_tag(data: &[u8], id: &GitId) -> Result<ParsedTag> {
     let split = data.windows(2).position(|w| w == b"\n\n").unwrap_or(data.len());
-    let header = std::str::from_utf8(&data[..split]).map_err(|_| anyhow!("tag {} isn't UTF-8 (not supported yet)", hex(id)))?;
-    let message = data.get(split + 2..).unwrap_or_default();
-    let message = String::from_utf8(message.to_vec()).map_err(|_| anyhow!("tag {} has a message that isn't UTF-8", hex(id)))?;
+    let header = crate::objects::from_git_bytes(&data[..split]);
+    let message = crate::objects::from_git_bytes(data.get(split + 2..).unwrap_or_default());
     let (mut object, mut kind, mut name, mut tagger, mut extra) = (None, String::new(), String::new(), None, Vec::new());
     let mut last_was_extra = false;
     for line in header.split('\n') {
         if line.starts_with(' ') && last_was_extra {
-            extra.extend_from_slice(line.as_bytes());
+            extra.extend_from_slice(&crate::objects::to_git_bytes(line));
             extra.push(b'\n');
             continue;
         }
@@ -436,7 +741,7 @@ fn parse_tag(data: &[u8], id: &GitId) -> Result<ParsedTag> {
             "tag" => name = value.to_string(),
             "tagger" => tagger = Some(parse_signature(value)?),
             _ => {
-                extra.extend_from_slice(line.as_bytes());
+                extra.extend_from_slice(&crate::objects::to_git_bytes(line));
                 extra.push(b'\n');
                 last_was_extra = true;
             }
@@ -452,7 +757,7 @@ fn parse_tree(data: &[u8]) -> Result<Vec<(Vec<u8>, String, GitId)>> {
         let space = data[p..].iter().position(|&b| b == b' ').context("malformed git tree")? + p;
         let nul = data[space..].iter().position(|&b| b == 0).context("malformed git tree")? + space;
         let id: GitId = data.get(nul + 1..nul + 21).context("malformed git tree")?.try_into().unwrap();
-        let name = String::from_utf8(data[space + 1..nul].to_vec()).map_err(|_| anyhow!("a file name isn't UTF-8 (not supported yet)"))?;
+        let name = crate::objects::from_git_bytes(&data[space + 1..nul]);
         out.push((data[p..space].to_vec(), name, id));
         p = nul + 21;
     }
@@ -464,6 +769,10 @@ struct Importer<'a> {
     objects: &'a HashMap<GitId, (u8, Arc<Vec<u8>>)>,
     /// New copse objects to store: (copse id, kind, content, original git id).
     out: Vec<(Id, Kind, Arc<Vec<u8>>, GitId)>,
+    /// A shallow fetch's boundary: these commits' parents weren't sent.
+    shallow: &'a HashSet<GitId>,
+    /// A partial clone: file contents weren't sent.
+    partial: bool,
 }
 
 impl Importer<'_> {
@@ -496,7 +805,11 @@ impl Importer<'_> {
             } else if mode == Mode::Submodule {
                 crate::objects::gitlink_id(&child) // another repository's commit: kept as its git id
             } else {
-                self.map.copse(&child).with_context(|| format!("the server didn't send the contents of {name}"))?
+                match self.map.copse(&child) {
+                    Some(id) => id,
+                    None if self.partial => crate::objects::gitlink_id(&child), // fetched when needed
+                    None => bail!("the server didn't send the contents of {name}"),
+                }
             };
             entries.push(TreeEntry { name, mode, id });
         }
@@ -541,7 +854,12 @@ impl Importer<'_> {
         let parents = c
             .parents
             .iter()
-            .map(|p| self.map.copse(p).with_context(|| format!("missing parent commit {}", hex(p))))
+            .map(|p| match self.map.copse(p) {
+                Some(id) => Ok(id),
+                // At a shallow boundary the parent stays a git id until it's fetched.
+                None if self.shallow.contains(&g) => Ok(crate::objects::gitlink_id(p)),
+                None => Err(anyhow!("missing parent commit {}", hex(p))),
+            })
             .collect::<Result<Vec<_>>>()?;
         let commit = Commit { tree, parents, author: c.author, committer: c.committer, extra: c.extra, message: c.message };
         let bytes = commit.encode();
@@ -581,9 +899,19 @@ fn commit_order(objects: &HashMap<GitId, (u8, Arc<Vec<u8>>)>, map: &GitMap) -> R
 }
 
 /// Read a pack from a git server into copse. Returns the number of objects received.
-pub fn import_pack(repo: &Repo, map: &mut GitMap, pack: &[u8]) -> Result<usize> {
+/// Commits in `shallow` (a shallow fetch's boundary) may name parents that weren't sent.
+/// With `partial`, files whose contents weren't sent are named by their git ids.
+pub fn import_pack(repo: &Repo, map: &mut GitMap, pack: &[u8], shallow: &HashSet<GitId>, partial: bool) -> Result<usize> {
     let (objects, count) = read_pack(pack)?;
-    let mut im = Importer { map, objects: &objects, out: Vec::new() };
+    import_objects(repo, map, &objects, shallow, partial)?;
+    Ok(count)
+}
+
+/// Translate git objects into copse and store them. Returns how many there were.
+fn import_objects(repo: &Repo, map: &mut GitMap, objects: &HashMap<GitId, (u8, Arc<Vec<u8>>)>, shallow: &HashSet<GitId>, partial: bool) -> Result<usize> {
+    let objects = objects.clone();
+    let count = objects.len();
+    let mut im = Importer { map, objects: &objects, out: Vec::new(), shallow, partial };
 
     // File contents first, hashed in parallel.
     let blobs: Vec<(GitId, Arc<Vec<u8>>)> = objects
