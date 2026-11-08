@@ -52,6 +52,49 @@ pub(crate) fn head_label(repo: &Repo) -> Result<String> {
     })
 }
 
+/// `copse status --porcelain`: a stable, plain format for scripts and editors.
+/// One fact per line, never coloured, never reworded between versions:
+///   branch NAME | branch (detached) ID
+///   upstream origin/NAME AHEAD BEHIND        (when there's a remote branch)
+///   state merging|rebasing|cherry-picking|reverting|bisecting
+///   A PATH | M PATH | D PATH                 (changes, sorted by path)
+///   C PATH                                   (files with conflict markers)
+fn status_porcelain(repo: &Repo, ch: &Changes) -> Result<()> {
+    match repo.head()? {
+        Head::Branch(b) => println!("branch {b}"),
+        Head::Detached(id) => println!("branch (detached) {}", id.to_hex()),
+    }
+    if let Some((up, ahead, behind)) = upstream(repo) {
+        println!("upstream {up} {ahead} {behind}");
+    }
+    let mut conflicted: Vec<String> = Vec::new();
+    if let Some(m) = MergeState::load(repo)? {
+        println!("state merging");
+        conflicted = m.unresolved(repo);
+    }
+    if let Some(r) = crate::rebase::RebaseState::load(repo)? {
+        println!("state {}", match r.op {
+            crate::rebase::Op::Rebase => "rebasing",
+            crate::rebase::Op::CherryPick => "cherry-picking",
+            crate::rebase::Op::Revert => "reverting",
+        });
+        conflicted = r.unresolved(repo);
+    }
+    if repo.wt.join("BISECT_STATE").exists() {
+        println!("state bisecting");
+    }
+    let mut lines: Vec<(&str, char)> = Vec::new();
+    lines.extend(ch.added.iter().map(|p| (p.as_str(), 'A')));
+    lines.extend(ch.modified.iter().map(|p| (p.as_str(), 'M')));
+    lines.extend(ch.deleted.iter().map(|p| (p.as_str(), 'D')));
+    lines.sort();
+    for (p, k) in lines {
+        let k = if conflicted.iter().any(|c| c == p) { 'C' } else { k };
+        println!("{k} {p}");
+    }
+    Ok(())
+}
+
 pub(crate) fn print_changes(ch: &Changes) {
     let mut lines: Vec<(&str, char, &str)> = Vec::with_capacity(ch.len());
     lines.extend(ch.added.iter().map(|p| (p.as_str(), 'A', "32")));
@@ -83,7 +126,20 @@ pub fn init(dir: Option<&Path>, bare: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn status() -> Result<()> {
+/// The current branch's remote counterpart, and how far apart they are:
+/// ("origin/main", ahead, behind).
+fn upstream(repo: &Repo) -> Option<(String, usize, usize)> {
+    let Ok(Head::Branch(b)) = repo.head() else { return None };
+    let local = repo.branch(&b).ok()??;
+    let remote = repo.tracking("origin", &b).ok()??;
+    if !repo.store.contains(&remote) {
+        return None;
+    }
+    let (ahead, behind) = crate::merge::ahead_behind(repo, local, remote)?;
+    Some((format!("origin/{b}"), ahead, behind))
+}
+
+pub fn status(porcelain: bool) -> Result<()> {
     let repo = Repo::find()?;
     let mut index = Index::load(&repo.wt)?;
     let files = snapshot(&repo.root, &index, None)?;
@@ -91,10 +147,21 @@ pub fn status() -> Result<()> {
     if refresh(&mut index, &files) {
         index.save(&repo.wt)?;
     }
+    if porcelain {
+        return status_porcelain(&repo, &ch);
+    }
 
     match repo.head()? {
         Head::Branch(b) => println!("On branch {}", paint("1", &b)),
         Head::Detached(id) => println!("HEAD detached at {}", paint("33", &short(&id))),
+    }
+    if let Some((up, ahead, behind)) = upstream(&repo) {
+        println!("{}", match (ahead, behind) {
+            (0, 0) => format!("In step with {up}."),
+            (a, 0) => format!("{a} commit(s) ahead of {up}: `copse push` sends them."),
+            (0, b) => format!("{b} commit(s) behind {up}: `copse pull` brings them in."),
+            (a, b) => format!("{a} commit(s) ahead of {up} and {b} behind: `copse pull` merges them (or `--rebase`), then push."),
+        });
     }
     if repo.head_commit()?.is_none() {
         println!("No commits yet");

@@ -102,5 +102,24 @@ EOF
 expect_fail "corrupt object rejected on clone" "does not match its id" cps clone drive/proj.copse broken
 [[ ! -e broken ]] && ok "failed clone leaves nothing behind" || fail "partial clone left behind"
 
+echo "== status: where you stand against the remote, and --porcelain"
+cd "$WORK" && rm -rf st-hub st-a st-b && cps init --bare st-hub >/dev/null
+mkdir st-a && cd st-a && cps init >/dev/null && echo a > a.txt && cps commit -m one >/dev/null && cps remote add origin ../st-hub >/dev/null && cps push >/dev/null
+same "$(cps status | sed -n 2p)" "In step with origin/main." "status says when you're in step with the remote"
+echo b > b.txt && cps commit -m two >/dev/null
+same "$(cps status | sed -n 2p)" "1 commit(s) ahead of origin/main: \`copse push\` sends them." "and how many commits there are to push"
+cps push >/dev/null && cd .. && cps clone st-hub st-b >/dev/null && cd st-b && echo c > c.txt && cps commit -m three >/dev/null && cps push >/dev/null && cd ../st-a && cps fetch >/dev/null
+same "$(cps status | sed -n 2p)" "1 commit(s) behind origin/main: \`copse pull\` brings them in." "or to pull"
+echo d > d.txt && cps commit -m four >/dev/null
+cps status | sed -n 2p | grep "1 commit(s) ahead of origin/main and 1 behind" >/dev/null && ok "or that the branches have diverged" || fail "line $LINENO: $(cps status | sed -n 2p)"
+echo new > new.txt && rm a.txt && echo changed > b.txt
+same "$(cps status --porcelain | tr '\n' '|')" "branch main|upstream origin/main 1 1|D a.txt|M b.txt|A new.txt|" "--porcelain: branch, upstream with ahead and behind, then each change, sorted"
+cps status --porcelain | grep $'\e' >/dev/null && fail "--porcelain must never be coloured" || ok "--porcelain is never coloured"
+cps reset --hard >/dev/null && cps stash drop >/dev/null && echo "ours" > c.txt && cps commit -m "c ours" >/dev/null && cd ../st-b && echo "theirs" > c.txt && cps commit -m "c theirs" >/dev/null && cps push >/dev/null && cd ../st-a
+cps pull >/dev/null 2>&1 || true
+cps status --porcelain | grep -x "state merging" >/dev/null && cps status --porcelain | grep -x "C c.txt" >/dev/null && ok "--porcelain shows a merge in progress and its conflicted files" || fail "line $LINENO: $(cps status --porcelain | tr '\n' '|')"
+cps merge --abort >/dev/null; cps checkout "$(cps log --oneline -n 1 | cut -c1-10)" >/dev/null
+cps status --porcelain | sed -n 1p | grep "^branch (detached) [0-9a-f]\{64\}$" >/dev/null && ok "a detached HEAD shows its full id" || fail "line $LINENO: $(cps status --porcelain | head -1)"
+
 echo
 echo "All $pass checks passed."

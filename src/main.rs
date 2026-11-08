@@ -189,7 +189,11 @@ enum Command {
     Serve { path: PathBuf },
     /// Show what changed since the last commit
     #[command(alias = "st")]
-    Status,
+    Status {
+        /// A stable, plain format for scripts and editors (see the README)
+        #[arg(long)]
+        porcelain: bool,
+    },
     /// Snapshot the whole working directory as a new commit
     #[command(alias = "ci")]
     Commit {
@@ -800,7 +804,7 @@ fn main() {
         Command::Stash { action: Some(StashAction::Pop { n }), .. } => stash::apply(*n, false),
         Command::Stash { action: Some(StashAction::Apply { n }), .. } => stash::apply(*n, true),
         Command::Stash { action: Some(StashAction::Drop { n }), .. } => stash::drop(*n),
-        Command::Status => cmd::status(),
+        Command::Status { porcelain } => cmd::status(*porcelain),
         Command::Commit { message, amend, paths, no_verify, patch, sign, no_sign } => {
             let sign = if *sign { Some(true) } else if *no_sign { Some(false) } else { None };
             cmd::commit(message.as_deref(), paths, *amend, *no_verify, sign, *patch)

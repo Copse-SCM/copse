@@ -41,7 +41,8 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 |---|---|
 | `copse init [dir]` | Create a repository in the current folder, or in `dir` |
 | `copse init --bare <dir>` | Create a shared copy with no working files, to push to and pull from |
-| `copse status` (`st`) | List added (A), modified (M) and deleted (D) files |
+| `copse status` (`st`) | List added (A), modified (M) and deleted (D) files, and say where you stand against `origin` (in step, commits to push or pull, or diverged) |
+| `copse status --porcelain` | The same in a stable, plain format for scripts and editors, one fact per line: `branch NAME` (or `branch (detached) ID`), `upstream origin/NAME AHEAD BEHIND`, `state merging` (or `rebasing`, `cherry-picking`, `reverting`, `bisecting`), then `A`/`M`/`D PATH` for each change, and `C PATH` for files with conflict markers. Never coloured, never reworded between versions. |
 | `copse commit -m "msg" [paths...]` (`ci`) | Snapshot every file that isn't ignored. There is no staging step: give paths to commit only changes under them, leaving the rest uncommitted. |
 | `copse commit -p [-m "msg"] [paths...]` | Pick which changes to commit, one at a time, like `git add -p`: for each change ("hunk") answer `y`/`n`, or `a` (the rest of this file), `d` (skip the rest of this file), `q` (stop). Only what you pick is committed; your files aren't touched, and the rest stays uncommitted. New files, deletions and non-text files are a single yes/no. |
 | `copse commit -S` / `--no-gpg-sign` | Sign the commit with your SSH or GPG key (git's format, so GitHub shows it as Verified); `commit.gpgSign` signs every commit |

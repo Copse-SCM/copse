@@ -35,7 +35,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | Feature | Status | Notes |
 |---|---|---|
 | `init`, `init --bare` | ✅ | |
-| `status` | ✅ | Short format only |
+| `status` | ✅ | Where you stand against origin (ahead/behind); `--porcelain` for scripts and editors |
 | Staging area (`add`) | ➖ | `commit` snapshots everything that isn't ignored |
 | Commit only some files (`commit <paths>`) | ✅ | Whole files or folders, or pick changes within files with `commit -p` (like `add -p`) |
 | `commit -m` | ✅ | |

@@ -124,6 +124,37 @@ pub fn is_ancestor(repo: &Repo, a: Id, b: Id) -> Result<bool> {
 /// The best common ancestor of `a` and `b`: a commit both reach that isn't itself an
 /// ancestor of another such commit. Exact even when commits share a timestamp; if
 /// several candidates remain (criss-cross history), the newest is chosen.
+/// Commits reachable from `from` and not from `not`, counted up to a limit (so a
+/// huge history can't stall the screen). None past the limit.
+fn count_only_in(repo: &Repo, from: Id, not: Id) -> Option<usize> {
+    const LIMIT: usize = 20_000;
+    let reach = |start: Id| -> Option<HashSet<Id>> {
+        let mut seen = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(id) = stack.pop() {
+            if seen.insert(id) {
+                if seen.len() > LIMIT {
+                    return None;
+                }
+                if let Ok(c) = repo.read_commit(&id) {
+                    stack.extend(c.parents);
+                }
+            }
+        }
+        Some(seen)
+    };
+    let a = reach(from)?;
+    let b = reach(not)?;
+    Some(a.difference(&b).count())
+}
+
+pub fn ahead_behind(repo: &Repo, local: Id, remote: Id) -> Option<(usize, usize)> {
+    if local == remote {
+        return Some((0, 0));
+    }
+    Some((count_only_in(repo, local, remote)?, count_only_in(repo, remote, local)?))
+}
+
 pub fn merge_base(repo: &Repo, a: Id, b: Id) -> Result<Option<Id>> {
     let of_a = ancestors(repo, a)?;
     let common: Vec<Id> = ancestors(repo, b)?.into_iter().filter(|id| of_a.contains(id)).collect();

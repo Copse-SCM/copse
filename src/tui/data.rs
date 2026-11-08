@@ -6,7 +6,6 @@ use crate::objects::{short, Id};
 use crate::repo::{Head, Repo};
 use crate::worktree::{changes, snapshot, Index};
 use anyhow::Result;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -122,37 +121,6 @@ pub fn load_history(exe: &Path, root: &Path, limit: usize) -> Vec<LogRow> {
         .collect()
 }
 
-/// Commits reachable from `from` and not from `not`, counted up to a limit (so a
-/// huge history can't stall the screen). None past the limit.
-fn count_only_in(repo: &Repo, from: Id, not: Id) -> Option<usize> {
-    const LIMIT: usize = 20_000;
-    let reach = |start: Id| -> Option<HashSet<Id>> {
-        let mut seen = HashSet::new();
-        let mut stack = vec![start];
-        while let Some(id) = stack.pop() {
-            if seen.insert(id) {
-                if seen.len() > LIMIT {
-                    return None;
-                }
-                if let Ok(c) = repo.read_commit(&id) {
-                    stack.extend(c.parents);
-                }
-            }
-        }
-        Some(seen)
-    };
-    let a = reach(from)?;
-    let b = reach(not)?;
-    Some(a.difference(&b).count())
-}
-
-pub fn ahead_behind(repo: &Repo, local: Id, remote: Id) -> Option<(usize, usize)> {
-    if local == remote {
-        return Some((0, 0));
-    }
-    Some((count_only_in(repo, local, remote)?, count_only_in(repo, remote, local)?))
-}
-
 fn title_of(repo: &Repo, id: &Id) -> String {
     repo.read_commit(id).map(|c| c.message.lines().next().unwrap_or_default().to_string()).unwrap_or_default()
 }
@@ -164,7 +132,7 @@ pub fn load_branches(repo: &Repo) -> Result<Vec<BranchRow>> {
     };
     let mut out = Vec::new();
     for (name, id) in repo.branches()? {
-        let ahead_behind = repo.tracking("origin", &name).ok().flatten().filter(|t| repo.store.contains(t)).and_then(|t| ahead_behind(repo, id, t));
+        let ahead_behind = repo.tracking("origin", &name).ok().flatten().filter(|t| repo.store.contains(t)).and_then(|t| crate::merge::ahead_behind(repo, id, t));
         out.push(BranchRow { current: current.as_deref() == Some(name.as_str()), title: title_of(repo, &id), name, id, remote: false, ahead_behind });
     }
     for (name, id) in repo.tracking_refs()? {
@@ -190,7 +158,7 @@ pub fn header(repo: &Repo, changes: usize) -> String {
         Ok(Head::Branch(b)) => {
             let mut s = b.clone();
             if let (Ok(Some(local)), Ok(Some(remote))) = (repo.branch(&b), repo.tracking("origin", &b)) {
-                if let Some((a, bh)) = ahead_behind(repo, local, remote) {
+                if let Some((a, bh)) = crate::merge::ahead_behind(repo, local, remote) {
                     s += &match (a, bh) {
                         (0, 0) => "  in step with origin".to_string(),
                         (a, 0) => format!("  ↑{a} to push"),
