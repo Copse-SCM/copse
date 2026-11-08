@@ -598,6 +598,7 @@ pub fn short(id: &Id) -> String {
 
 // ---------------------------------------------------------------- trees
 
+#[derive(Clone, Debug)]
 pub struct TreeEntry {
     pub name: String,
     pub mode: Mode,

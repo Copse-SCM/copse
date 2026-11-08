@@ -1,56 +1,12 @@
-mod branches;
-mod plumbing;
-mod pretty;
-mod cmd;
-mod config;
-mod diffs;
-mod durable;
-mod ffwd;
-mod gc;
-mod githttp;
-mod gitimport;
-mod gitview;
-mod gitwire;
-mod hunks;
-mod hooks;
-mod identity;
-mod integrity;
-mod investigate;
-mod lfs;
-mod logs;
-mod merge;
-mod objects;
-mod pack;
-mod rebase;
-mod reflog;
-mod renames;
-mod remote;
-mod repo;
-mod signing;
-mod restore;
-mod sparse;
-mod stash;
-mod submodules;
-mod tags;
-mod tools;
-mod transport;
-mod tui;
-mod worktree;
-mod worktrees;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use copse::*;
 use std::path::PathBuf;
 
 /// copse: a small, fast, personal version control system.
 ///
 /// There is no staging area: `copse commit` snapshots every file that isn't
 /// ignored by .gitignore or .copseignore.
-/// The version: Cargo's, or the full name a release or nightly build was given
-/// (COPSE_BUILD at compile time, e.g. "2026.11.09-dev+abc1234" for a nightly).
-pub const VERSION: &str = match option_env!("COPSE_BUILD") {
-    Some(v) => v,
-    None => env!("CARGO_PKG_VERSION"),
-};
 
 #[derive(Parser)]
 #[command(name = "copse", version = VERSION)]
@@ -758,7 +714,7 @@ fn quiet_on_closed_stdout() {
 }
 
 /// Whether `name` is one of copse's own commands (or their short forms).
-pub fn is_builtin_command(name: &str) -> bool {
+fn builtin_command(name: &str) -> bool {
     name == "help" || Cli::command().get_subcommands().any(|c| c.get_name() == name || c.get_all_aliases().any(|a| a == name))
 }
 
@@ -767,7 +723,7 @@ pub fn is_builtin_command(name: &str) -> bool {
 /// repository with the remaining arguments, and copse exits with its status.
 fn expand_aliases(mut args: Vec<String>) -> Vec<String> {
     for _ in 0..10 {
-        let Some(name) = args.get(1).filter(|a| !a.starts_with('-') && !is_builtin_command(a)).cloned() else { return args };
+        let Some(name) = args.get(1).filter(|a| !a.starts_with('-') && !builtin_command(a)).cloned() else { return args };
         let Some((_, value)) = config::aliases().into_iter().find(|(n, _)| *n == name) else { return args };
         if let Some(shell) = value.strip_prefix('!') {
             let dir = repo::Repo::find_any().map(|r| r.root).unwrap_or_else(|_| PathBuf::from("."));
@@ -831,6 +787,7 @@ fn log_count_shorthand(args: Vec<String>) -> Vec<String> {
 }
 
 fn main() {
+    let _ = copse::BUILTIN_COMMANDS.set(builtin_command);
     quiet_on_closed_stdout();
     let args = log_count_shorthand(expand_aliases(std::env::args().collect()));
     let cli = Cli::parse_from(&args);

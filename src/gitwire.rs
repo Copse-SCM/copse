@@ -24,13 +24,13 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 pub type GitId = [u8; 20];
-const NO_ID: GitId = [0; 20];
+pub const NO_ID: GitId = [0; 20];
 
 pub fn hex(id: &GitId) -> String {
     id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn parse_git_id(s: &str) -> Result<GitId> {
+pub fn parse_git_id(s: &str) -> Result<GitId> {
     if s.len() != 40 {
         bail!("bad git object id {s:?}");
     }
@@ -391,7 +391,7 @@ fn object_header(kind: u8, mut size: usize) -> Vec<u8> {
 /// Write a version-2 git pack of `ids` (all already translated): "PACK", version,
 /// count, then each object zlib-compressed, then a SHA-1 of everything before it.
 /// Returns (objects, bytes).
-fn write_git_pack(w: &mut impl Write, tr: &Translator, ids: &[Id]) -> Result<(usize, u64)> {
+pub fn write_git_pack(w: &mut impl Write, tr: &Translator, ids: &[Id]) -> Result<(usize, u64)> {
     let mut seen = HashSet::new();
     let mut unique = Vec::with_capacity(ids.len());
     for id in ids {
