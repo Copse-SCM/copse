@@ -16,7 +16,7 @@ copse is versioned with itself and pushed with copse to [Copse-SCM/copse](https:
 With [Homebrew](https://brew.sh) (macOS or Linux):
 
 ```bash
-brew install copse-scm/copse/copse            # the latest release (from the first release on)
+brew install copse-scm/copse/copse            # the latest release
 brew install copse-scm/copse/copse-nightly    # or the latest daily build of main
 ```
 
