@@ -1,11 +1,16 @@
 # Pushing a version tag (vYEAR.MONTH.N, e.g. v2026.11.0) builds copse for every
 # platform and publishes a GitHub release with the archives and their checksums.
 # The tag must match the version in Cargo.toml.
+#
+# Run it by hand from the Actions tab for a dry run: everything happens the same
+# way, but the release is a draft (only the repository's admins can see it) named
+# "dry-run", and the Homebrew formula is printed instead of pushed to the tap.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -22,15 +29,20 @@ jobs:
       - id: v
         name: The tag matches Cargo.toml
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "A dry run of the release of $cargo."
+            { echo "version=$cargo"; echo "tag=dry-run"; echo "dry_run=true"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
           if ! [[ "$tag" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$ ]]; then
             echo "::error::release tags look like v2026.11.0 (year.month.release), not $GITHUB_REF_NAME"; exit 1
           fi
           if [ "$tag" != "$cargo" ]; then
             echo "::error::the tag says $tag but Cargo.toml says $cargo"; exit 1
           fi
-          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          { echo "version=$tag"; echo "tag=$GITHUB_REF_NAME"; echo "dry_run=false"; } >> "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -45,6 +57,8 @@ jobs:
       contents: write # to create the release
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      DRY_RUN: ${{ needs.version.outputs.dry_run }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -55,8 +69,14 @@ jobs:
         run: cd dist && sha256sum copse-*.tar.gz > SHA256SUMS && cat SHA256SUMS
       - name: Publish the release
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "copse $VERSION" --generate-notes
+          if [ "$DRY_RUN" = true ]; then
+            gh release delete dry-run --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+            gh release create dry-run dist/* --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+              --title "copse $VERSION (dry run)" --notes "A dry run of the release workflow; not a release. Safe to delete."
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "copse $VERSION" --generate-notes
+          fi
 
   # Point the Homebrew tap (Copse-SCM/homebrew-copse) at the new release. Writing to
   # another repository needs a token: a fine-grained one, for that repository only,
@@ -67,6 +87,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      DRY_RUN: ${{ needs.version.outputs.dry_run }}
       TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -82,7 +104,12 @@ jobs:
       - name: Update the formula
         if: env.TAP_TOKEN != ''
         run: |
-          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS
+          if [ "$DRY_RUN" = true ]; then
+            echo "Dry run: this is the formula a release would push to the tap:"
+            python3 packaging/homebrew/render.py "$VERSION" "v$VERSION" SHA256SUMS
+            exit 0
+          fi
           git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/Copse-SCM/homebrew-copse.git" tap
           mkdir -p tap/Formula
           python3 packaging/homebrew/render.py "$VERSION" "v$VERSION" SHA256SUMS > tap/Formula/copse.rb
