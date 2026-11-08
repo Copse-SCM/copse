@@ -32,6 +32,14 @@ TOKEN = "RemoteAuth upload-token-123"
 os.makedirs(LFS, exist_ok=True)
 
 
+def store_path(oid):
+    """Where an LFS object's contents live, or None if `oid` isn't an LFS id (64 hex
+    digits). Nothing else ever reaches the file system."""
+    if not isinstance(oid, str) or len(oid) != 64 or any(c not in "0123456789abcdef" for c in oid):
+        return None
+    return os.path.join(LFS, oid)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/lfs-store/"):
@@ -71,7 +79,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         out = []
         for o in req.get("objects", []):
             oid, size = o["oid"], o["size"]
-            have = os.path.exists(os.path.join(LFS, oid))
+            path = store_path(oid)
+            if path is None:
+                out.append({"oid": str(oid), "size": size, "error": {"code": 422, "message": "not an LFS id"}})
+                continue
+            have = os.path.exists(path)
             item = {"oid": oid, "size": size, "authenticated": True}
             if op == "download":
                 if have:
@@ -87,8 +99,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.reply(200, json.dumps({"transfer": "basic", "objects": out}).encode())
 
     def lfs_get(self):
-        path = os.path.join(LFS, os.path.basename(self.path))
-        if not os.path.exists(path):
+        path = store_path(self.path.rsplit("/", 1)[-1])
+        if path is None or not os.path.exists(path):
             return self.reply(404, b"")
         with open(path, "rb") as f:
             self.reply(200, f.read(), "application/octet-stream")
@@ -96,11 +108,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def lfs_put(self):
         if self.headers.get("Authorization") != TOKEN:
             return self.reply(401, b"")
-        oid = os.path.basename(self.path)
+        oid = self.path.rsplit("/", 1)[-1]
+        path = store_path(oid)
         data = self.body()
-        if hashlib.sha256(data).hexdigest() != oid:
+        if path is None or hashlib.sha256(data).hexdigest() != oid:
             return self.reply(422, b'{"message":"contents do not match the oid"}')
-        with open(os.path.join(LFS, oid), "wb") as f:
+        with open(path, "wb") as f:
             f.write(data)
         self.reply(200, b"")
 
@@ -108,8 +121,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != TOKEN:
             return self.reply(401, b"")
         req = json.loads(self.body())
-        path = os.path.join(LFS, req["oid"])
-        ok = os.path.exists(path) and os.path.getsize(path) == req["size"]
+        path = store_path(req.get("oid"))
+        ok = path is not None and os.path.exists(path) and os.path.getsize(path) == req.get("size")
         self.reply(200 if ok else 404, b"")
 
     def run_backend(self):
