@@ -543,7 +543,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `commit.sh` | 59 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
-| `github.sh` | 124 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user |
+| `github.sh` | 124 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
 | `investigate.sh` | 33 | `blame` (every line compared with `git blame`) and `bisect` |
