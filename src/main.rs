@@ -190,7 +190,7 @@ enum Command {
     /// Show what changed since the last commit
     #[command(alias = "st")]
     Status {
-        /// A stable, plain format for scripts and editors (see the README)
+        /// A stable, plain format for scripts and editors (see docs/guide.md)
         #[arg(long)]
         porcelain: bool,
     },
