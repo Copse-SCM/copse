@@ -1,0 +1,18 @@
+# Keep dependencies current: Rust crates and the GitHub Actions CI uses (which are
+# pinned to exact commits, so updates arrive as reviewed pull requests).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      crates:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
