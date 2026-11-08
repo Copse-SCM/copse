@@ -3,6 +3,7 @@
 # follows the batch API, as GitHub's does).
 # Usage: tests/bridge.sh [work_dir]     (build first: cargo build --release; needs git, python3, curl)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 COPSE="$HERE/../target/release/copse"
@@ -72,7 +73,7 @@ PORT=$(cat port.txt); URL="http://127.0.0.1:$PORT"
 mkdir w && cd w && cps init >/dev/null
 cps lfs track "*.bin" | has "Tracking \*.bin with LFS" && grep -q '^\*.bin filter=lfs diff=lfs merge=lfs -text$' .gitattributes && ok "lfs track writes git-lfs's .gitattributes line" || fail "line $LINENO: a step before this check failed"
 head -c 400000 /dev/urandom > asset.bin && echo text > notes.txt && cps commit -m "add asset" >/dev/null
-oid=$(shasum -a 256 asset.bin | cut -d' ' -f1)
+oid=$(sha256 asset.bin)
 same "$(cps lfs ls-files)" "${oid:0:10} * asset.bin  (400000 bytes)" "lfs ls-files lists it, contents here"
 same "$(cps status | tail -1)" "Nothing changed." "a tracked file counts as unchanged after committing"
 cps remote add origin "http://tester:s3cret@127.0.0.1:$PORT/proj.git" >/dev/null
@@ -94,7 +95,7 @@ cps checkout main >/dev/null
 cd ..
 # Someone using git with git-lfs: a pointer committed, its contents uploaded straight to the server.
 git clone -q "$URL/proj.git" gw && cd gw
-head -c 5000 /dev/urandom > other.bin && goid=$(shasum -a 256 other.bin | cut -d' ' -f1)
+head -c 5000 /dev/urandom > other.bin && goid=$(sha256 other.bin)
 curl -s -f -X PUT -H "Authorization: RemoteAuth upload-token-123" --data-binary @other.bin "$URL/lfs-store/$goid" >/dev/null
 printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize 5000\n' "$goid" > other.pointer && cp other.bin ../other.orig && mv other.pointer other.bin
 git add other.bin && git commit -qm "git-lfs user adds other.bin" && git push -q "http://tester:s3cret@127.0.0.1:$PORT/proj.git" main && cd ..

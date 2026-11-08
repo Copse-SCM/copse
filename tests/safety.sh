@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fsck, gc removing unused objects, crash safety, and large files (streamed, so
 # memory stays flat).
-# Usage: tests/safety.sh [work_dir]     (build first: cargo build --release; macOS, for /usr/bin/time -l)
+# Usage: tests/safety.sh [work_dir]     (build first: cargo build --release)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -25,7 +26,6 @@ expect_fail() {
 loose() { find .copse/objects -type f -not -path '*/pack/*' -not -name '.tmp-*' | wc -l | tr -d ' '; }
 obj_path() { local h; h=$(cps show "$1" | awk 'NR==1 {print $2}'); echo ".copse/objects/${h:0:2}/${h:2}"; }
 old() { touch -t 202001010000 "$@"; }   # make files look years old
-peak_mb() { /usr/bin/time -l "$@" 2>&1 >/dev/null | awk '/maximum resident/ {printf "%d", $1/1048576}'; }
 
 echo "== fsck"
 mkdir r && cd r && cps init >/dev/null
@@ -95,11 +95,11 @@ old .copse/objects/pack/*.pack
 before=$(cps fsck | sed -n 's/^\([0-9]*\) object(s) aren.t used.*/\1/p')
 cps gc | has "Removed $before unused" && ok "unused objects in a two-week-old pack are removed" || fail "line $LINENO: a step before this check failed"
 echo packed2 > p.txt && cps stash -m packed2 >/dev/null && cps gc --prune now >/dev/null && cps stash drop >/dev/null
-week_ago=$(date -v-7d +%Y%m%d%H%M) && touch -t "$week_ago" .copse/objects/pack/*.pack
-pack_time=$(stat -f %m .copse/objects/pack/*.pack)
+week_ago=$(days_ago 7) && touch -t "$week_ago" .copse/objects/pack/*.pack
+pack_time=$(mtime .copse/objects/pack/*.pack)
 echo more > m.txt && cps commit -m "more" >/dev/null   # something new, so gc rewrites the pack
 cps gc | has "kept for now" && ok "in a week-old pack they're kept, as loose files, when gc rewrites it" || fail "line $LINENO: a step before this check failed"
-times=$(find .copse/objects -type f -not -path '*/pack/*' -exec stat -f %m {} \; | sort -u | tr '\n' ' ')
+times=$(find .copse/objects -type f -not -path '*/pack/*' | while read -r f; do mtime "$f"; done | sort -u | tr '\n' ' ')
 same "$times" "$pack_time " "carrying the pack's age, so they still expire a week from now"
 cps fsck | has "everything is intact" && ok "nothing needed was lost" || fail "line $LINENO: a step before this check failed"
 

@@ -3,6 +3,7 @@
 # --stat (checked against git's own --stat for the same commits), merges, tags.
 # Usage: tests/diff.sh [work_dir]     (build first: cargo build --release; needs git)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -29,14 +30,14 @@ mkdir repo && cd repo && cps init >/dev/null
 printf 'one\ntwo\nthree\nfour\nfive\n' > a.txt && echo "bee" > b.txt && printf '#!/bin/sh\n' > run.sh
 python3 -c "import random; open('img.bin','wb').write(random.Random(1).randbytes(2000))"
 cps commit -m "first" >/dev/null && cps tag c1 >/dev/null
-sed -i '' 's/^three$/THREE/' a.txt && printf 'x\ny\nz\n' > c.txt && rm b.txt
+sedi 's/^three$/THREE/' a.txt && printf 'x\ny\nz\n' > c.txt && rm b.txt
 cps commit -m "second" >/dev/null && cps tag c2 >/dev/null
 chmod +x run.sh && python3 -c "import random; open('img.bin','wb').write(random.Random(2).randbytes(2000))"
 cps commit -m "third" >/dev/null && cps tag c3 >/dev/null
 
 echo "== copse diff"
 same "$(cps diff)" "" "no changes: no output"
-sed -i '' 's/^five$/FIVE/' a.txt
+sedi 's/^five$/FIVE/' a.txt
 out=$(cps diff); [[ "$out" == *"-five"* && "$out" == *"+FIVE"* && "$out" == *"--- a/a.txt"* ]] && ok "your edits against the last commit" || fail "$out"
 same "$(cps diff --stat | summary)" "1 file changed, 1 insertion(+), 1 deletion(-)" "--stat summary for an uncommitted edit"
 out=$(cps diff c2); [[ "$out" == *"+FIVE"* && "$out" == *"mode changed from 100644 to 100755"* && "$out" == *"Binary file differs"* ]] && ok "your files against an older revision" || fail "$out"

@@ -2,6 +2,7 @@
 # cherry-pick, revert, clean and grep.
 # Usage: tests/history.sh [work_dir]     (build first: cargo build --release)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -27,9 +28,9 @@ clean_tree() { [[ "$(cps status | tail -1)" == "Nothing changed." ]]; }
 mkdir repo && cd repo && cps init >/dev/null
 printf '1\n2\n3\n4\n5\n' > n.txt && cps commit -m base >/dev/null
 cps branch topic >/dev/null && cps checkout topic >/dev/null
-sed -i '' 's/^2$/TWO/' n.txt && cps commit -m "topic: two" >/dev/null
+sedi 's/^2$/TWO/' n.txt && cps commit -m "topic: two" >/dev/null
 echo t > t.txt && cps commit -m "topic: add t" >/dev/null
-sed -i '' 's/^4$/FOUR/' n.txt && cps commit -m "topic: four" >/dev/null
+sedi 's/^4$/FOUR/' n.txt && cps commit -m "topic: four" >/dev/null
 cps checkout main >/dev/null && echo m > m.txt && cps commit -m "main work" >/dev/null
 
 echo "== cherry-pick"
@@ -43,7 +44,7 @@ cps cherry-pick topic | has "already there" && ok "a change that's already there
 clean_tree && ok "clean afterwards" || fail "line $LINENO: a step before this check failed"
 
 echo "== cherry-pick conflicts"
-cps branch other HEAD~3 >/dev/null && cps checkout other >/dev/null && sed -i '' 's/^2$/deux/' n.txt && cps commit -m "other: deux" >/dev/null && echo o > o.txt && cps commit -m "other: add o" >/dev/null && cps checkout main >/dev/null
+cps branch other HEAD~3 >/dev/null && cps checkout other >/dev/null && sedi 's/^2$/deux/' n.txt && cps commit -m "other: deux" >/dev/null && echo o > o.txt && cps commit -m "other: add o" >/dev/null && cps checkout main >/dev/null
 out=$(cps cherry-pick other~1 other); [[ "$out" == *"Conflict while applying"*"other: deux"*"copse cherry-pick --continue"* ]] && ok "a conflict stops with cherry-pick instructions" || fail "$out"
 cps status | has "Cherry-picking onto main (0 of 2 commits done)" && ok "status shows the cherry-pick" || fail "line $LINENO: a step before this check failed"
 expect_fail "other commands name the cherry-pick" "a cherry-pick is in progress" cps commit -m x
@@ -74,8 +75,8 @@ cps revert HEAD~2 HEAD~3 >/dev/null && same "$(sed -n 4p n.txt) | $(test -e t.tx
 cps reset --hard HEAD~2 >/dev/null
 cps revert HEAD~4..HEAD~2 | has "Reverted 2 commit(s)" && [[ ! -e t.txt && "$(sed -n 4p n.txt)" == "4" ]] && ok "revert a range (newest first)" || fail "line $LINENO: a step before this check failed"
 printf 'a\nb\nc\n' > r.txt && cps commit -m "r base" >/dev/null
-sed -i '' 's/^b$/B/' r.txt && cps commit -m "r: b to B" >/dev/null
-sed -i '' 's/^B$/BB/' r.txt && cps commit -m "r: B to BB" >/dev/null
+sedi 's/^b$/B/' r.txt && cps commit -m "r: b to B" >/dev/null
+sedi 's/^B$/BB/' r.txt && cps commit -m "r: B to BB" >/dev/null
 out=$(cps revert HEAD~1); [[ "$out" == *"Conflict"*"copse revert --continue"* ]] && ok "a conflicting revert stops with revert instructions" || fail "$out"
 printf 'a\nb\nc\n' > r.txt && cps revert --continue | has "Reverted 1 commit(s)" && same "$(lines r.txt)" "a b c" "and --continue finishes it" || fail "line $LINENO: a step before this check failed"
 expect_fail "revert needs a commit" "say which commit" cps revert
@@ -97,7 +98,7 @@ same "$(cps grep alpha | sed 's/\x1b\[[0-9;]*m//g')" $'words.txt:1:alpha beta\nw
 same "$(cps grep -i gamma | cut -d: -f1-2)" "words.txt:2" "-i ignores case"
 same "$(cps grep -l 'a.+a')" "words.txt" "-l lists files; patterns are regular expressions"
 same "$(cps grep -c alpha)" "words.txt:2" "-c counts"
-cps commit -m words words.txt other.txt bin.dat >/dev/null && sed -i '' '1s/alpha/omega/' words.txt
+cps commit -m words words.txt other.txt bin.dat >/dev/null && sedi '1s/alpha/omega/' words.txt
 same "$(cps grep -c alpha HEAD)" "HEAD:words.txt:2" "search a revision instead of your files"
 same "$(cps grep -c alpha 2>/dev/null; echo "exit $?")" "words.txt:1
 exit 0" "your files are searched as they are now"

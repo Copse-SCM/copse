@@ -3,6 +3,7 @@
 # commits, branches containing merges, pull --rebase, and the safety guards.
 # Usage: tests/rebase.sh [work_dir]     (build first: cargo build --release)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -23,7 +24,7 @@ expect_fail() { # expect_fail "description" "message substring" cmd...
 }
 history() { cps log -n 50 | grep -v UTC | sed 's/^ *//' | grep -v '^$' | tr '\n' ',' | sed 's/,$//'; }
 fingerprint() {
-  find . -path ./.copse -prune -o -type f -print | LC_ALL=C sort | while read -r f; do echo "$f $(shasum < "$f")"; done | shasum | cut -c1-16
+  find . -path ./.copse -prune -o -type f -print | LC_ALL=C sort | while read -r f; do echo "$f $(hashin < "$f")"; done | hashin | cut -c1-16
 }
 lines() { tr '\n' ' ' < "$1" | sed 's/ $//'; }
 commit() { cps commit -m "$1" >/dev/null; }
@@ -34,14 +35,14 @@ setup() {
   printf '1\n2\n3\n4\n5\n' > shared.txt && commit base
   cps branch feature >/dev/null
   echo a1 > a.txt && commit A1
-  sed -i '' 's/^1$/ONE-main/' shared.txt && commit A2
+  sedi 's/^1$/ONE-main/' shared.txt && commit A2
 }
 
 echo "== clean rebase"
 setup clean
 cps checkout feature >/dev/null
 echo f1 > f.txt && commit F1
-sed -i '' 's/^5$/FIVE-feature/' shared.txt && commit F2
+sedi 's/^5$/FIVE-feature/' shared.txt && commit F2
 echo f3 >> f.txt && commit F3
 main_before=$(cat .copse/refs/main)
 cps rebase main | tail -1 | has "Rebased feature onto main" && ok "rebase reports success" || fail "line $LINENO: a step before this check failed"
@@ -67,7 +68,7 @@ echo "== conflict, then --continue"
 setup cont
 cps checkout feature >/dev/null
 echo f1 > f.txt && commit F1
-sed -i '' 's/^1$/ONE-feature/' shared.txt && echo new > added-by-F2.txt && commit F2
+sedi 's/^1$/ONE-feature/' shared.txt && echo new > added-by-F2.txt && commit F2
 echo f3 >> f.txt && commit F3
 out=$(cps rebase main)
 [[ "$out" == *"Conflict while applying"*"F2"*"(2/3)"* ]] && ok "stops at the conflicting commit (2 of 3)" || fail "no stop: $out"
@@ -89,7 +90,7 @@ cd ..
 echo "== conflict, then --skip"
 setup skip
 cps checkout feature >/dev/null
-sed -i '' 's/^1$/ONE-feature/' shared.txt && echo x > from-skipped.txt && commit F1
+sedi 's/^1$/ONE-feature/' shared.txt && echo x > from-skipped.txt && commit F1
 echo f2 > f.txt && commit F2
 cps rebase main >/dev/null
 cps rebase --skip | tail -1 | has "Rebased feature onto main" && ok "skip drops the commit and finishes" || fail "line $LINENO: a step before this check failed"
@@ -102,7 +103,7 @@ echo "== conflict, then --abort"
 setup abort
 cps checkout feature >/dev/null
 echo f1 > f.txt && commit F1
-sed -i '' 's/^1$/ONE-feature/' shared.txt && echo new > added-by-F2.txt && commit F2
+sedi 's/^1$/ONE-feature/' shared.txt && echo new > added-by-F2.txt && commit F2
 orig=$(cat .copse/refs/feature); before=$(fingerprint)
 cps rebase main >/dev/null
 cps rebase --abort | has "back at" && ok "abort reports success" || fail "line $LINENO: a step before this check failed"
@@ -154,7 +155,7 @@ mkdir alice && cd alice && cps init >/dev/null && printf '1\n2\n3\n' > notes.txt
 cps remote add origin ../hub.copse >/dev/null && cps push >/dev/null
 cd .. && cps clone hub.copse bob >/dev/null
 cd bob && echo bob > bob.txt && commit "bob's work" && cps push >/dev/null
-cd ../alice && sed -i '' 's/^3$/THREE/' notes.txt && commit "alice's work"
+cd ../alice && sedi 's/^3$/THREE/' notes.txt && commit "alice's work"
 expect_fail "plain push is rejected (diverged)" "has commits you don't have" cps push
 cps pull --rebase | tail -1 | has "Rebased main onto origin/main" && ok "pull --rebase replays local work on top" || fail "line $LINENO: a step before this check failed"
 same "$(history)" "alice's work,bob's work,start" "history is linear, no merge commit"

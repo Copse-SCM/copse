@@ -3,6 +3,7 @@
 # history, conflicts, ignored files, guards, and stashes surviving gc.
 # Usage: tests/stash.sh [work_dir]     (build first: cargo build --release)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -23,8 +24,8 @@ expect_fail() {
 }
 fingerprint() {
   find . -path ./.copse -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort | while read -r f; do
-    if [[ -L "$f" ]]; then echo "$f link $(readlink "$f")"; else echo "$f $(stat -f %p "$f") $(shasum < "$f")"; fi
-  done | shasum | cut -c1-16
+    if [[ -L "$f" ]]; then echo "$f link $(readlink "$f")"; else echo "$f $(fmode "$f") $(hashin < "$f")"; fi
+  done | hashin | cut -c1-16
 }
 
 echo "== guards before any commits"
@@ -39,7 +40,7 @@ cps commit -m base >/dev/null
 same "$(cps stash)" "No changes to stash." "nothing to stash on a clean tree"
 
 echo "== save and restore every kind of change"
-sed -i '' 's/^3$/THREE/' notes.txt     # modified
+sedi 's/^3$/THREE/' notes.txt     # modified
 echo brand-new > new.txt                # added
 rm gone.txt                             # deleted
 chmod +x run.sh                         # mode change
@@ -76,8 +77,8 @@ same "$(cps stash list)" "No stashes." "all dropped"
 expect_fail "pop with no stashes is reported" "there are no stashes" cps stash pop
 
 echo "== restore after history moved on"
-sed -i '' 's/^1$/ONE-stashed/' notes.txt && cps stash >/dev/null
-sed -i '' 's/^5$/FIVE-committed/' notes.txt && cps commit -m "later work" >/dev/null
+sedi 's/^1$/ONE-stashed/' notes.txt && cps stash >/dev/null
+sedi 's/^5$/FIVE-committed/' notes.txt && cps commit -m "later work" >/dev/null
 cps stash pop >/dev/null
 same "$(tr '\n' ' ' < notes.txt)" "ONE-stashed 2 THREE 4 FIVE-committed " "stash merges cleanly onto newer commits"
 cps commit -m "stashed edit" >/dev/null
@@ -89,8 +90,8 @@ cps stash pop >/dev/null && [[ "$(cat idea.txt)" == "feature-idea" ]] && ok "sta
 cps commit -m idea >/dev/null && cps checkout main >/dev/null
 
 echo "== conflict keeps the stash"
-sed -i '' 's/^2$/TWO-stashed/' notes.txt && cps stash >/dev/null
-sed -i '' 's/^2$/TWO-committed/' notes.txt && cps commit -m conflicting >/dev/null
+sedi 's/^2$/TWO-stashed/' notes.txt && cps stash >/dev/null
+sedi 's/^2$/TWO-committed/' notes.txt && cps commit -m conflicting >/dev/null
 out=$(cps stash pop)
 [[ "$out" == *"1 conflict(s)"* && "$out" == *"stash was kept"* ]] && ok "pop reports the conflict" || fail "$out"
 grep -q '^<<<<<<< current$' notes.txt && grep -q 'TWO-stashed' notes.txt && ok "conflict markers written" || fail "line $LINENO: a step before this check failed"
@@ -98,8 +99,8 @@ same "$(cps stash list | wc -l | tr -d ' ')" "1" "conflicted stash not dropped"
 printf '1\nTWO-both\n3\n4\n5\n' > notes.txt && cps commit -m resolved >/dev/null && cps stash drop >/dev/null && ok "resolve, commit, then drop" || fail "line $LINENO: a step before this check failed"
 
 echo "== guards during merge and rebase"
-cps checkout other >/dev/null && sed -i '' 's/^4$/FOUR-other/' notes.txt && cps commit -m o >/dev/null
-cps checkout main >/dev/null && sed -i '' 's/^4$/FOUR-main/' notes.txt && cps commit -m m >/dev/null
+cps checkout other >/dev/null && sedi 's/^4$/FOUR-other/' notes.txt && cps commit -m o >/dev/null
+cps checkout main >/dev/null && sedi 's/^4$/FOUR-main/' notes.txt && cps commit -m m >/dev/null
 cps merge other >/dev/null
 expect_fail "stash refused during a merge" "merge is in progress" cps stash
 cps merge --abort >/dev/null

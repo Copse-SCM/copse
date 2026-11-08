@@ -3,6 +3,7 @@
 # git doing the same), and stashing only some files.
 # Usage: tests/workflow.sh [work_dir]     (build first: cargo build --release; needs git)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -48,7 +49,7 @@ cd ..
 echo "== merges follow renames"
 mkdir rn && cd rn && cps init >/dev/null && seq 1 30 > old.txt && seq 101 130 > other.txt && cps commit -m base >/dev/null
 cps branch side >/dev/null && cps checkout side >/dev/null && mkdir lib && sed 's/^5$/five/' old.txt > lib/new.txt && rm old.txt && cps commit -m "rename and edit" >/dev/null
-cps checkout main >/dev/null && sed -i '' 's/^25$/twentyfive/' old.txt && cps commit -m "edit under the old name" >/dev/null
+cps checkout main >/dev/null && sedi 's/^25$/twentyfive/' old.txt && cps commit -m "edit under the old name" >/dev/null
 cps merge side >/dev/null && same "$(test -e old.txt && echo old || echo no-old) $(grep -c -E '^(five|twentyfive)$' lib/new.txt)" "no-old 2" "a rename on one side and an edit on the other combine in the renamed file" || fail "line $LINENO: a step before this check failed"
 cps checkout side >/dev/null && cps merge main >/dev/null && grep -q twentyfive lib/new.txt && ok "and the other way round" || fail "line $LINENO: a step before this check failed"
 cps checkout main >/dev/null && cps branch del >/dev/null && cps branch ren >/dev/null

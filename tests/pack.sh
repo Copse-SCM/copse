@@ -3,6 +3,7 @@
 # packing, transfers must work from packed repositories, and damage must be caught.
 # Usage: tests/pack.sh [work_dir]     (build first: cargo build --release)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -111,7 +112,7 @@ out=$(cps log -n 1 2>&1 || true)
 [[ "$out" == *"corrupt"* ]] && ok "corrupted pack index is reported" || fail "corrupt idx not reported: $out"
 cp /tmp/copse-idx-backup "$idx"
 pack=$(ls .copse/objects/pack/*.pack)
-size=$(stat -f %z "$pack"); printf '\x00\x00\x00\x00\x00\x00\x00\x00' | dd of="$pack" bs=1 seek=$((size / 2)) conv=notrunc 2>/dev/null
+size=$(fsize "$pack"); printf '\x00\x00\x00\x00\x00\x00\x00\x00' | dd of="$pack" bs=1 seek=$((size / 2)) conv=notrunc 2>/dev/null
 out=$(cd .. && rm -rf copy3 && cps clone repo copy3 2>&1 || true)
 # Depending on where the damage lands, either the sender notices (and says so) or
 # the receiver's hash check does. Either way the cause must be shown.

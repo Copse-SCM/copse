@@ -106,9 +106,15 @@ impl App {
             quit: false,
         };
         app.reload();
-        // Start the Branches screen on the branch you're on.
+        // Start the Branches screen on the branch you're on, and History on the commit you're on.
         if let Some(i) = app.branches.iter().position(|b| b.current) {
             app.sel.insert("branches", i);
+        }
+        if let Ok(Some(head)) = app.repo.head_commit() {
+            let id = crate::objects::short(&head);
+            if let Some(i) = app.history.iter().position(|r| r.id.as_deref() == Some(id.as_str())) {
+                app.sel.insert("history", i);
+            }
         }
         Ok(app)
     }

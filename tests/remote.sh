@@ -2,6 +2,7 @@
 # End-to-end test of clone, push, pull, fetch, merge-on-pull and safety checks.
 # Usage: tests/remote.sh [work_dir]     (build first: cargo build --release)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -42,8 +43,8 @@ cd ../laptop && cps pull | has "Fast-forward" && ok "pull fast-forwards" || fail
 [[ -f desk.txt ]] && ok "pulled file arrived" || fail "desk.txt missing"
 
 echo "== diverged: push rejected, pull merges, push succeeds"
-sed -i '' 's/^a$/A-laptop/' src/notes.txt && cps commit -m "laptop edit" >/dev/null
-cd ../desktop && sed -i '' 's/^e$/E-desktop/' src/notes.txt && cps commit -m "desktop edit" >/dev/null && cps push >/dev/null
+sedi 's/^a$/A-laptop/' src/notes.txt && cps commit -m "laptop edit" >/dev/null
+cd ../desktop && sedi 's/^e$/E-desktop/' src/notes.txt && cps commit -m "desktop edit" >/dev/null && cps push >/dev/null
 cd ../laptop
 expect_fail "push of diverged branch is rejected" "has commits you don't have" cps push
 cps pull | has "Merged origin/main" && ok "pull makes a merge commit" || fail "line $LINENO: a step before this check failed"

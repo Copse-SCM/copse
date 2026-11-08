@@ -3,6 +3,7 @@
 # and prints the screen), with every action's effect checked with the command line.
 # Usage: tests/tui.sh [work_dir]     (build first: cargo build --release)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -32,6 +33,7 @@ echo "$out" | has "+new" || echo "$out" | has "+notes" && ok "with the selected 
 ui "j" | has '+    println!("hello");' && ok "moving down shows the next file's diff" || fail "line $LINENO: a step before this check failed"
 out=$(ui "2"); echo "$out" | has "* " && echo "$out" | has "(main) Docs" && echo "$out" | has "Add lib" && ok "History shows the commit graph" || fail "$out"
 echo "$out" | has "Author: Ada Lovelace" && ok "with the selected commit's details" || fail "line $LINENO: a step before this check failed"
+ui "2" | grep "▶" | has "(main)" && ok "and starts on the commit you're on, wherever it is in the graph" || fail "line $LINENO: a step before this check failed"
 out=$(ui "3"); echo "$out" | has "* main" && echo "$out" | has "feature" && ok "Branches lists them, with the current one marked" || fail "$out"
 echo "$out" | has "▶ * main" && ok "and starts on the current branch" || fail "line $LINENO: a step before this check failed"
 ui "4" | has "HEAD@{0}" && ok "Undo shows the timeline" || fail "line $LINENO: a step before this check failed"

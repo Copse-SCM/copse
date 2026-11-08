@@ -2,6 +2,7 @@
 # blame (every line checked against git blame) and bisect.
 # Usage: tests/investigate.sh [work_dir]     (build first: cargo build --release; needs git)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/portable.sh"   # sedi, mtime, days_ago, peak_mb, ... (macOS and Linux)
 
 COPSE="$(cd "$(dirname "$0")/.." && pwd)/target/release/copse"
 WORK="${1:-$(mktemp -d)}"
@@ -36,14 +37,14 @@ git_titles() {
 echo "== blame"
 mkdir repo && cd repo && cps init >/dev/null
 printf 'one\ntwo\nthree\nfour\nfive\nsix\n' > f.txt && echo keep > other.txt && cps commit -m "c1 base" >/dev/null && tick
-sed -i '' 's/^two$/TWO/' f.txt && cps commit -m "c2 shout two" >/dev/null && tick
+sedi 's/^two$/TWO/' f.txt && cps commit -m "c2 shout two" >/dev/null && tick
 COPSE_AUTHOR="Other Dev" COPSE_EMAIL=o@example.com sh -c 'printf "zero\n" | cat - f.txt > t && mv t f.txt' && COPSE_AUTHOR="Other Dev" COPSE_EMAIL=o@example.com cps commit -m "c3 add zero (other dev)" >/dev/null && tick
 cps branch side >/dev/null && cps checkout side >/dev/null
-sed -i '' 's/^six$/SIX/' f.txt && echo seven >> f.txt && cps commit -m "c4 side: six, seven" >/dev/null && tick
+sedi 's/^six$/SIX/' f.txt && echo seven >> f.txt && cps commit -m "c4 side: six, seven" >/dev/null && tick
 cps checkout main >/dev/null
-sed -i '' '/^four$/d' f.txt && sed -i '' 's/^one$/one!/' f.txt && cps commit -m "c5 main: drop four, one!" >/dev/null && tick
+sedi '/^four$/d' f.txt && sedi 's/^one$/one!/' f.txt && cps commit -m "c5 main: drop four, one!" >/dev/null && tick
 cps merge side >/dev/null && tick
-sed -i '' 's/^three$/three (after merge)/' f.txt && cps commit -m "c6 after merge" >/dev/null && tick
+sedi 's/^three$/three (after merge)/' f.txt && cps commit -m "c6 after merge" >/dev/null && tick
 echo more >> other.txt && cps commit -m "c7 unrelated" >/dev/null
 
 out=$(cps blame f.txt | plain)
@@ -59,7 +60,7 @@ same "$(copse_titles f.txt side)" "$(git_titles origin/side -- f.txt)" "and on a
 same "$(copse_titles -L 2,4 f.txt HEAD)" "$(git_titles -L 2,4 f.txt)" "-L START,END limits the lines"
 same "$(cps blame -L 6, f.txt | wc -l | tr -d ' ')" "2" "-L START, goes to the end"
 
-echo "uncommitted" >> f.txt && sed -i '' 's/^TWO$/TWO edited/' f.txt
+echo "uncommitted" >> f.txt && sedi 's/^TWO$/TWO edited/' f.txt
 same "$(copse_titles f.txt | sed -n '3p;$p' | tr '\n' ',')" "(uncommitted),(uncommitted)," "lines you haven't committed are marked as such"
 cps blame f.txt | plain | has "Not committed yet" && ok "with 'Not committed yet' where the author would be" || fail "line $LINENO: a step before this check failed"
 cps reset --hard >/dev/null && cps stash drop >/dev/null
