@@ -9,6 +9,7 @@ mod githttp;
 mod gitimport;
 mod gitview;
 mod gitwire;
+mod hunks;
 mod hooks;
 mod identity;
 mod integrity;
@@ -203,6 +204,9 @@ enum Command {
         /// Skip the pre-commit and commit-msg hooks
         #[arg(short = 'n', long = "no-verify")]
         no_verify: bool,
+        /// Pick which changes to commit, one at a time (like git add -p)
+        #[arg(short = 'p', long = "patch")]
+        patch: bool,
         /// Sign the commit (with user.signingKey; gpg.format ssh or openpgp)
         #[arg(short = 'S', long = "gpg-sign", conflicts_with = "no_sign")]
         sign: bool,
@@ -797,9 +801,9 @@ fn main() {
         Command::Stash { action: Some(StashAction::Apply { n }), .. } => stash::apply(*n, true),
         Command::Stash { action: Some(StashAction::Drop { n }), .. } => stash::drop(*n),
         Command::Status => cmd::status(),
-        Command::Commit { message, amend, paths, no_verify, sign, no_sign } => {
+        Command::Commit { message, amend, paths, no_verify, patch, sign, no_sign } => {
             let sign = if *sign { Some(true) } else if *no_sign { Some(false) } else { None };
-            cmd::commit(message.as_deref(), paths, *amend, *no_verify, sign)
+            cmd::commit(message.as_deref(), paths, *amend, *no_verify, sign, *patch)
         }
         Command::VerifyCommit { revs } => signing::verify_commits(revs),
         Command::VerifyTag { names } => signing::verify_tags(names),

@@ -59,6 +59,31 @@ cd .. && mkdir empty && cd empty && cps init >/dev/null && echo z > z
 expect_fail "nothing to amend before the first commit" "no commit to amend" cps commit --amend -m x
 cd ../repo
 
+echo "== commit -p: pick changes one at a time"
+cd .. && mkdir pk && cd pk && cps init >/dev/null
+seq 1 30 | sed 's/^/line /' > f.txt && echo gone > old.txt && printf 'bin\0ary' > b.bin && cps commit -m base >/dev/null
+sedi 's/^line 3$/LINE THREE/; s/^line 25$/LINE 25/' f.txt && echo new > new.txt && rm old.txt
+out=$(printf 'y\nn\ny\nn\n' | NO_COLOR=1 cps commit -p -m "picked"); [[ "$out" == *"(change 1 of 2)"* && "$out" == *"(picked changes)"* ]] && ok "commit -p shows each change and asks about it" || fail "$out"
+cps show | has "+LINE THREE" && ! cps show | has "+LINE 25" && cps show | has "new.txt" && ! cps show | has "old.txt" && ok "only the picked changes are committed" || fail "line $LINENO: a step before this check failed"
+grep -q "LINE 25" f.txt && [[ ! -e old.txt ]] && ok "your files are untouched" || fail "line $LINENO: a step before this check failed"
+same "$(cps status | grep -E '^  [AMD] ' | sed 's/^ *//' | tr '\n' ',')" "M f.txt,D old.txt," "what wasn't picked is still an uncommitted change"
+cps diff | has "+LINE 25" && ! cps diff | has "LINE THREE" && ok "and diff shows just that part" || fail "line $LINENO: a step before this check failed"
+cps commit -m "the rest" >/dev/null && cps status | tail -1 | has "Nothing changed." && ok "a normal commit then takes the rest" || fail "line $LINENO: a step before this check failed"
+for n in 2 12 22; do sedi "s/^line $n\$/LINE $n/" f.txt; done
+printf 'n\na\n' | cps commit -p -m "a takes the rest" >/dev/null && ! cps show | has "+LINE 2$" && cps show | has "+LINE 12" && cps show | has "+LINE 22" && ok "a takes this change and the rest of the file" || fail "line $LINENO: a step before this check failed"
+cps commit -m sync >/dev/null; for n in 4 14 24; do sedi "s/^line $n\$/LINE $n/" f.txt; done
+printf 'y\nd\n' | cps commit -p -m "d skips the rest" >/dev/null && cps show | has "+LINE 4" && ! cps show | has "LINE 14" && ! cps show | has "LINE 24" && ok "d skips the rest of the file" || fail "line $LINENO: a step before this check failed"
+cps commit -m sync2 >/dev/null; echo more > more.txt && echo extra > extra.txt
+printf 'y\nq\n' | cps commit -p -m "q keeps what's picked" >/dev/null && cps show | has "extra.txt" && ! cps show | has "more.txt" && ok "q stops, committing what was picked so far" || fail "line $LINENO: a step before this check failed"
+before=$(cps log --oneline -n 1)
+printf 'n\n' | cps commit -p -m none | has "Nothing picked, so nothing was committed." && same "$(cps log --oneline -n 1)" "$before" "picking nothing commits nothing" || fail "line $LINENO: a step before this check failed"
+printf 'y\nA message typed after picking\n' | cps commit -p >/dev/null && same "$(cps log -n 1 --oneline | sed -E 's/^[0-9a-f]{10} (\([^)]*\) )?//')" "A message typed after picking" "without -m, it asks for the message after picking"
+printf 'bin\0ARY' > b.bin && printf 'y\n' | NO_COLOR=1 cps commit -p -m bin | has "(not text): commit the change?" && ok "files that aren't text are all-or-nothing" || fail "line $LINENO: a step before this check failed"
+mkdir -p sub && echo s > sub/s.txt && echo t > top2.txt && printf 'y\n' | cps commit -p -m "just sub" sub >/dev/null && cps show | has "sub/s.txt" && ! cps show | has "top2.txt" && ok "-p with a path asks only about changes there" || fail "line $LINENO: a step before this check failed"
+expect_fail "-p and --amend don't mix" "don't go together" cps commit -p --amend -m x
+cps fsck | has "everything is intact" && ok "fsck agrees after all that" || fail "line $LINENO: a step before this check failed"
+cd ../repo   # where the next section expects to start
+
 echo "== log: whole history and options"
 cd .. && rm -rf hist && mkdir hist && cd hist && cps init >/dev/null
 echo 1 > a && cps commit -m base >/dev/null && tick

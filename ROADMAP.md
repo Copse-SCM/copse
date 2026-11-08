@@ -37,7 +37,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | `init`, `init --bare` | ✅ | |
 | `status` | ✅ | Short format only |
 | Staging area (`add`) | ➖ | `commit` snapshots everything that isn't ignored |
-| Commit only some files (`commit <paths>`) | ✅ | Whole files or folders; picking parts of a file (`add -p`) isn't supported |
+| Commit only some files (`commit <paths>`) | ✅ | Whole files or folders, or pick changes within files with `commit -p` (like `add -p`) |
 | `commit -m` | ✅ | |
 | `commit --amend` | ✅ | Keeps author and date; with or without a new message; can take paths |
 | `diff` | ✅ | Your files or any revision vs any revision, `A..B`, `--stat` (matches git's), `-- paths` |

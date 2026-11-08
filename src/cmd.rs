@@ -149,8 +149,11 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: bool, sign: Option<bool>) -> Result<()> {
+pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: bool, sign: Option<bool>, patch: bool) -> Result<()> {
     let repo = Repo::find()?;
+    if patch && amend {
+        bail!("-p and --amend don't go together; commit the picked changes, then amend if you need to");
+    }
     // Committing is allowed while an interactive rebase is paused for `edit` (that's how
     // you split a commit); otherwise a rebase must be finished first.
     if let Some(r) = crate::rebase::RebaseState::load(&repo)?.filter(|r| !r.paused_for_edit) {
@@ -159,6 +162,9 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
     let merge = MergeState::load(&repo)?;
     if merge.is_some() && !paths.is_empty() {
         bail!("a merge is in progress: its result has to be committed as a whole, so leave out the paths");
+    }
+    if merge.is_some() && patch {
+        bail!("a merge is in progress: its result has to be committed as a whole, so leave out -p");
     }
     if merge.is_some() && amend {
         bail!("a merge is in progress: commit it first (`copse commit`), then amend if you need to");
@@ -174,6 +180,7 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
         (Some(_), _, _) => bail!("the commit message is empty"),
         (None, Some(m), _) => format!("Merge {} into {}", m.label, head_label(&repo)?),
         (None, None, Some(old)) => old.message.clone(),
+        (None, None, None) if patch => String::new(), // asked for after picking
         (None, None, None) => bail!("give a commit message with -m \"...\""),
     };
     if let Some(m) = &merge {
@@ -213,6 +220,30 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
         return Ok(());
     }
 
+    // -p: ask about each change, and commit only what's picked.
+    let picked = if patch {
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        let picked = crate::hunks::pick(&repo, &index, &files, &ch, &in_scope, &mut input)?;
+        if picked.is_empty() {
+            println!("Nothing picked, so nothing was committed.");
+            return Ok(());
+        }
+        if message.is_empty() {
+            print!("Message for this commit: ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut input, &mut line)?;
+            message = line.trim().to_string();
+            if message.is_empty() {
+                bail!("the commit message is empty, so nothing was committed");
+            }
+        }
+        Some(picked)
+    } else {
+        None
+    };
+
     // commit-msg may check or rewrite the message.
     if !no_verify {
         let path = repo.wt.join("COMMIT_EDITMSG");
@@ -227,9 +258,23 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
         }
     }
 
-    let mut tree_files: BTreeMap<String, (Mode, Id)> =
-        index.entries.iter().filter(|(p, _)| !in_scope(p)).map(|(p, e)| (p.clone(), (e.mode, Id::from_bytes(e.id)))).collect();
-    tree_files.extend(files.iter().filter(|f| in_scope(&f.path)).map(|f| (f.path.clone(), (f.mode, f.id))));
+    let mut tree_files: BTreeMap<String, (Mode, Id)> = match &picked {
+        // The last commit, with just the picked changes on top.
+        Some(picked) => {
+            let mut t: BTreeMap<String, (Mode, Id)> = index.entries.iter().map(|(p, e)| (p.clone(), (e.mode, Id::from_bytes(e.id)))).collect();
+            for (p, v) in picked {
+                match v {
+                    Some(v) => t.insert(p.clone(), *v),
+                    None => t.remove(p),
+                };
+            }
+            t
+        }
+        None => index.entries.iter().filter(|(p, _)| !in_scope(p)).map(|(p, e)| (p.clone(), (e.mode, Id::from_bytes(e.id)))).collect(),
+    };
+    if picked.is_none() {
+        tree_files.extend(files.iter().filter(|f| in_scope(&f.path)).map(|f| (f.path.clone(), (f.mode, f.id))));
+    }
     let tree = write_tree(&repo.store, tree_files.iter().map(|(p, (m, id))| (p.as_str(), *m, *id)))?;
 
     let title = message.lines().next().unwrap_or_default().to_string();
@@ -245,15 +290,44 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
     repo.advance_head(&id)?;
 
     // The index now describes the new commit: committed paths take your files' state.
-    index.entries.retain(|p, _| !in_scope(p));
-    index.entries.extend(files.iter().filter(|f| in_scope(&f.path)).map(|f| (f.path.clone(), f.entry())));
+    let (mut added, mut modified, mut deleted) = (added, modified, deleted);
+    match &picked {
+        Some(picked) => {
+            let on_disk: std::collections::HashMap<&str, &crate::worktree::File> = files.iter().map(|f| (f.path.as_str(), f)).collect();
+            (added, modified, deleted) = (0, 0, 0);
+            for (p, v) in picked {
+                let was = index.entries.contains_key(p);
+                match v {
+                    None => {
+                        index.entries.remove(p);
+                        deleted += 1;
+                    }
+                    Some((m, blob)) => {
+                        if was { modified += 1 } else { added += 1 }
+                        // Committed exactly as on disk: cache its stat. Partly: leave a
+                        // stat that won't match, so the rest still shows as a change.
+                        let entry = match on_disk.get(p.as_str()) {
+                            Some(f) if f.id == *blob && f.mode == *m => f.entry(),
+                            _ => crate::worktree::Entry { size: 0, mtime_ns: 0, mode: *m, id: *blob.as_bytes() },
+                        };
+                        index.entries.insert(p.clone(), entry);
+                    }
+                }
+            }
+        }
+        None => {
+            index.entries.retain(|p, _| !in_scope(p));
+            index.entries.extend(files.iter().filter(|f| in_scope(&f.path)).map(|f| (f.path.clone(), f.entry())));
+        }
+    }
     index.save(&repo.wt)?;
     MergeState::clear(&repo)?;
 
-    let note = if amended.is_some() { " (amended)" } else { "" };
+    let note = if amended.is_some() { " (amended)" } else if picked.is_some() { " (picked changes)" } else { "" };
     println!("[{} {}] {title}{note}", head_label(&repo)?, paint("33", &short(&id)));
     println!("  {added} added, {modified} modified, {deleted} deleted");
-    let left = ch.len() - committing;
+    // What's still uncommitted (unpicked changes, and anything outside the paths).
+    let left = changes(&index, &files).len();
     if left > 0 {
         println!("  {left} other change(s) left uncommitted");
     }

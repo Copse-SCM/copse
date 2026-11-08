@@ -43,6 +43,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse init --bare <dir>` | Create a shared copy with no working files, to push to and pull from |
 | `copse status` (`st`) | List added (A), modified (M) and deleted (D) files |
 | `copse commit -m "msg" [paths...]` (`ci`) | Snapshot every file that isn't ignored. There is no staging step: give paths to commit only changes under them, leaving the rest uncommitted. |
+| `copse commit -p [-m "msg"] [paths...]` | Pick which changes to commit, one at a time, like `git add -p`: for each change ("hunk") answer `y`/`n`, or `a` (the rest of this file), `d` (skip the rest of this file), `q` (stop). Only what you pick is committed; your files aren't touched, and the rest stays uncommitted. New files, deletions and non-text files are a single yes/no. |
 | `copse commit -S` / `--no-gpg-sign` | Sign the commit with your SSH or GPG key (git's format, so GitHub shows it as Verified); `commit.gpgSign` signs every commit |
 | `copse verify-commit [rev...]` | Check commits' signatures |
 | `copse tag -s <name> -m "..."` / `copse verify-tag <name>` | Make a signed tag (git's format); check a tag's signature |
