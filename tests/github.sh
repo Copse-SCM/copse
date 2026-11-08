@@ -322,9 +322,12 @@ cd "$WORK" && rm -rf dumb dumbw && mkdir dumb && git init -q --bare dumb/d.git &
 )
 git -C dumb/d.git gc -q && (cd dumbw && echo 4 >> v.txt && git commit -qam c4 && git push -q origin main)   # some packed, some loose
 git -C dumb/d.git update-server-info
-(cd dumb && exec python3 -u -m http.server 0 --bind 127.0.0.1) > dumb-server.log 2>&1 < /dev/null & dumb_pid=$!
+# A plain file server (no git on the server side), printing its port as soon as it listens.
+(cd dumb && exec python3 -c 'import http.server as h; s = h.ThreadingHTTPServer(("127.0.0.1", 0), h.SimpleHTTPRequestHandler); print(s.server_address[1], flush=True); s.serve_forever()') > dumb-port.txt 2> dumb-server.log < /dev/null & dumb_pid=$!
 trap 'kill $dumb_pid 2>/dev/null' EXIT
-for _ in $(seq 100); do dport=$(grep -o 'port [0-9]*' dumb-server.log 2>/dev/null | grep -o '[0-9]*' | head -1 || true); [[ -n "$dport" ]] && break; perl -e 'select(undef,undef,undef,0.1)'; done
+for _ in $(seq 300); do [[ -s dumb-port.txt ]] && break; perl -e 'select(undef,undef,undef,0.1)'; done
+dport=$(head -1 dumb-port.txt)
+[[ -n "$dport" ]] || fail "the plain file server didn't start within 30 seconds: $(cat dumb-server.log)"
 out=$(cps clone "http://127.0.0.1:$dport/d.git" dumbc 2>&1) || fail "$out"
 cd dumbc && same "$(cps log --format=%s | tr '\n' ' ')$(cps tag | awk '{print $1}')" "c4 c3 c2 c1 v1" "clone from a dumb server: packed and loose objects, and tags"
 same "$(cat v.txt | tr '\n' ',') $(wc -l < src/n.txt | tr -d ' ')" "v3,4, 300" "with the files as git has them"

@@ -7,8 +7,11 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Minor and patch updates together; each major upgrade (which may change
+      # code or formats, like bincode's) gets a pull request of its own.
       crates:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

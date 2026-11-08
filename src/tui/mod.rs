@@ -1001,7 +1001,10 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 
 // ---------------------------------------------------------------- running
 
-fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut idle = 0u64;
     while !app.quit {
         terminal.draw(|f| draw(f, app))?;
@@ -1033,7 +1036,10 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(
 
 /// Leave the screen, run `copse ARGS` in the plain terminal (so it can ask for a
 /// sign-in), wait for Enter, and come back.
-fn run_in_terminal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, args: &[String]) -> Result<()> {
+fn run_in_terminal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, args: &[String]) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     use ratatui::crossterm::{execute, terminal as ct};
     ct::disable_raw_mode()?;
     execute!(std::io::stdout(), ct::LeaveAlternateScreen)?;
