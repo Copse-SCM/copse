@@ -20,6 +20,7 @@ import json
 import base64
 import http.server
 import os
+import re
 import subprocess
 import sys
 
@@ -35,9 +36,12 @@ os.makedirs(LFS, exist_ok=True)
 def store_path(oid):
     """Where an LFS object's contents live, or None if `oid` isn't an LFS id (64 hex
     digits). Nothing else ever reaches the file system."""
-    if not isinstance(oid, str) or len(oid) != 64 or any(c not in "0123456789abcdef" for c in oid):
+    if not isinstance(oid, str) or not re.fullmatch(r"[0-9a-f]{64}", oid):
         return None
-    return os.path.join(LFS, oid)
+    path = os.path.normpath(os.path.join(LFS, oid))
+    if not path.startswith(LFS + os.sep):  # (the check CodeQL recognizes)
+        return None
+    return path
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
