@@ -1,6 +1,8 @@
 # copse
 
-A small, fast, personal version control system written in Rust. It runs on macOS and Linux.
+A small, fast, personal version control system written in Rust. It's built and tested on macOS; Linux should work but hasn't been tested yet.
+
+copse keeps its own history with copse: the project is versioned with itself and pushed with copse to [Copse-SCM/copse](https://github.com/Copse-SCM/copse) on GitHub (private).
 
 ```
 cargo build --release          # binary at target/release/copse
