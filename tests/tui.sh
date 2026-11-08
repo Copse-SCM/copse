@@ -131,12 +131,34 @@ ui "F,busy" | has "⟳ copse fetch… (keep going" && ok "fetch, pull and push r
 ui "F,j,2,busy" | has "2 History" && ok "you can move around while one runs" || fail "line $LINENO: a step before this check failed"
 ui "F,P,busy" | has "Wait: copse fetch is still running." && ok "and another can't start until it's done" || fail "line $LINENO: a step before this check failed"
 ui "3" | has "origin/main" && ok "remote branches are listed" || fail "line $LINENO: a step before this check failed"
+ui "F,q,busy" | has "still running. Quit anyway" && ok "quitting while one runs asks first" || fail "line $LINENO: a step before this check failed"
+ui "F,q,j,busy" | has "Staying." && ok "and any other key stays" || fail "line $LINENO: a step before this check failed"
+
+echo "== a push that needs a sign-in"
+mkdir -p ../web/private && git init -q --bare -b main ../web/private/secret.git
+python3 "$(cd "$(dirname "$COPSE")/../../tests" && pwd)/git-http-server.py" "$(cd ../web && pwd)" > ../web-port.txt 2> ../web-server.log &
+server_pid=$!
+trap 'kill $server_pid 2>/dev/null' EXIT
+for _ in $(seq 1 300); do [[ -s ../web-port.txt ]] && break; perl -e 'select(undef,undef,undef,0.1)'; done
+cps remote add web "http://127.0.0.1:$(cat ../web-port.txt)/private/secret.git" >/dev/null
+printf '[credential]\n\thelper = store --file=%s\n' "$WORK/creds" > "$WORK/gitconfig-tui" && : > "$WORK/creds"
+# P pushes to origin; point origin at the private repository for this check.
+cps remote remove origin >/dev/null && cps remote add origin "http://127.0.0.1:$(cat ../web-port.txt)/private/secret.git" >/dev/null
+out=$(GIT_CONFIG_GLOBAL="$WORK/gitconfig-tui" GIT_TERMINAL_PROMPT=0 ui "P" 110x30); echo "$out" | has "needs a sign-in, which can't be typed here" && echo "$out" | has "Press t to run" && ok "a push that needs a sign-in says so, and offers the terminal" || fail "$out"
+GIT_CONFIG_GLOBAL="$WORK/gitconfig-tui" GIT_TERMINAL_PROMPT=0 ui "P,t" 110x30 | has "(would run copse push in the terminal)" && ok "t hands the push to the terminal" || fail "line $LINENO: a step before this check failed"
+echo "http://tester:s3cret@127.0.0.1:$(cat ../web-port.txt)" > "$WORK/creds"
+GIT_CONFIG_GLOBAL="$WORK/gitconfig-tui" ui "P" 110x30 | has "Pushed main to origin" && ok "once the login is saved, P works in the screen" || fail "line $LINENO: a step before this check failed"
+kill $server_pid 2>/dev/null; trap - EXIT
 
 echo "== robustness"
 cd .. && mkdir empty && cd empty && cps init >/dev/null
 ui "" | has "Nothing changed since the last commit." && ok "an empty repository shows calmly" || fail "line $LINENO: a step before this check failed"
 ui "2,j,k,3,4,u,n,1,c" >/dev/null && ok "keys on empty screens do nothing harmful" || fail "line $LINENO: a step before this check failed"
 ui "" 40x10 | head -1 | has "copse" && ok "a small terminal still draws" || fail "line $LINENO: a step before this check failed"
+for size in 1x1 5x2 30x4 20x7; do for keys in "c" "c,tab,text:x,enter,enter" "?" "x" "enter" "2" "3" "4,u"; do
+  cps ui --replay "$keys" --size $size >/dev/null 2>&1 || fail "the screen crashed at $size after $keys"
+done; done
+ok "tiny terminals never crash it (every box, down to 1x1)"
 cps 2>&1 | has "Usage:" && ok "copse on its own, not in a terminal, prints the help" || fail "line $LINENO: a step before this check failed"
 
 echo

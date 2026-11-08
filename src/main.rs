@@ -45,8 +45,15 @@ use std::path::PathBuf;
 ///
 /// There is no staging area: `copse commit` snapshots every file that isn't
 /// ignored by .gitignore or .copseignore.
+/// The version: Cargo's, or the full name a release or nightly build was given
+/// (COPSE_BUILD at compile time, e.g. "0.1.0-dev.20261109+abc1234").
+pub const VERSION: &str = match option_env!("COPSE_BUILD") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser)]
-#[command(name = "copse", version)]
+#[command(name = "copse", version = VERSION)]
 struct Cli {
     /// Leave out to open the interactive screen (in a terminal)
     #[command(subcommand)]
@@ -55,6 +62,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Which version of copse this is (also --version)
+    Version,
     /// Create a new repository (in the current directory, or DIR)
     Init {
         dir: Option<PathBuf>,
@@ -973,6 +982,10 @@ fn main() {
             date: pretty::parse_date_mode(date.as_deref())?,
         })
         })(),
+        Command::Version => {
+            println!("copse {VERSION}");
+            Ok(())
+        }
         Command::CatFile { mode, object } => plumbing::cat_file(mode, object),
         Command::RevParse { revs, short, abbrev_ref, verify, quiet, show_toplevel, git_dir, inside_work_tree, is_bare } => plumbing::rev_parse(plumbing::RevParse {
             revs,

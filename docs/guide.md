@@ -43,7 +43,8 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 - **Anywhere:**
   - `1`–`4` or `tab` switch screens, and `j`/`k` or the arrow keys move.
   - `J`/`K` scroll the right-hand pane.
-  - `F` fetch, `L` pull, `P` push (in the background: the screen keeps working, and shows what happened when it's done), `r` refresh, `?` help, `q` quit.
+  - `F` fetch, `L` pull, `P` push (in the background: the screen keeps working, and shows what happened when it's done), `r` refresh, `?` help, `q` quit (it asks first if a fetch, pull or push is still running).
+  - **Signing in:** the screen can't ask for a password or an SSH key's passphrase. If a fetch, pull or push needs one, it says so and `t` runs the same command in the plain terminal, where git's sign-in can ask; you come back to the screen afterwards, and once the login is saved, `F`, `L` and `P` work here too.
 - **The top line** shows the branch, whether you're in step with origin (`↑2 to push`, `↓1 to pull`), and how many changes you have.
 - **Every action runs the same `copse` command** you'd type and shows what it said, so the screen does exactly what the command line does. Anything that could lose work asks first and keeps a backup.
 - **Picking parts of a file:** `enter` on a modified file lists its changes; `space` picks each one you want, `s` splits a change into smaller ones, and `l` goes into a change to pick single lines. `c` commits just what's picked (as `copse commit -p` does). Files with some changes picked are marked `[~]`; your files on disk aren't touched.
@@ -53,6 +54,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 
 | Command | What it does |
 |---|---|
+| `copse version` (or `--version`) | Which version this is (release and nightly builds carry their full name, e.g. `0.1.0-dev.20261109+abc1234`) |
 | `copse init [dir]` | Create a repository in the current folder, or in `dir` |
 | `copse init --bare <dir>` | Create a shared copy with no working files, to push to and pull from |
 | `copse status` (`st`) | List added (A), modified (M) and deleted (D) files, and say where you stand against `origin` (in step, commits to push or pull, or diverged) |
@@ -534,7 +536,7 @@ Every command that takes a revision understands git's names: a branch, `origin/m
 
 ## How it's tested
 
-Every suite builds real repositories in a fresh folder and checks what copse does, usually against git doing the same thing (git is the oracle). `tests/run-all.sh` runs them all and summarizes; CI runs it, plus `cargo test` and 150 stress-test rounds, on macOS and Linux for every push. The scripts work with both macOS and Linux tools, through `tests/portable.sh`. Build with `cargo build --release` first.
+Every suite builds real repositories in a fresh folder and checks what copse does, usually against git doing the same thing (git is the oracle). `tests/run-all.sh` runs them all and summarizes (`--update-docs` writes the counts below and the README's total, so they're never typed by hand; CI checks them with `--check-docs`); CI runs it, plus `cargo test` and 150 stress-test rounds, on macOS and Linux for every push. The scripts work with both macOS and Linux tools, through `tests/portable.sh`. Build with `cargo build --release` first.
 
 | Suite | Checks | What it covers |
 |---|---|---|
@@ -557,7 +559,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `security.sh` | 23 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 32 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |
-| `tui.sh` | 70 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
+| `tui.sh` | 76 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |
 | `workflow.sh` | 65 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
 

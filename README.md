@@ -53,4 +53,4 @@ copse                         # the interactive screen
 
 ## Status
 
-Version 0.1, for people who like trying new tools. 1,013 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.
+Version 0.1, for people who like trying new tools. 1,019 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.

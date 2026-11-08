@@ -28,7 +28,7 @@ jobs:
         run: cargo test --release
 
       - name: Test suites (git is the oracle wherever possible)
-        run: tests/run-all.sh "$RUNNER_TEMP/copse-tests"
+        run: tests/run-all.sh --check-docs "$RUNNER_TEMP/copse-tests"
 
       - name: Randomized stress test against git
         run: python3 tests/fuzz.py 150 1 "$RUNNER_TEMP/copse-fuzz"

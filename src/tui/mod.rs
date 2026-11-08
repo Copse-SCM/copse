@@ -93,6 +93,20 @@ struct App {
     job: Option<Job>,
     /// A finished background job, shown when nothing else is on screen.
     job_done: Option<(String, String, bool)>,
+    /// A command that failed for want of a sign-in: `t` runs it in the terminal.
+    retry_in_terminal: Option<Vec<String>>,
+    /// Asked for with `t`: the event loop leaves the screen, runs it, and comes back.
+    terminal_request: Option<Vec<String>>,
+    /// Asking before quitting while a background job runs.
+    confirm_quit: bool,
+}
+
+/// Whether a command failed because it needs a sign-in (HTTPS login or SSH key):
+/// something the screen can't ask for, but the terminal can.
+fn needs_sign_in(text: &str) -> bool {
+    ["needs you to sign in", "sign-in to", "refused access (403)", "Permission denied (publickey", "Host key verification failed", "could not read Username", "Authentication failed"]
+        .iter()
+        .any(|m| text.contains(m))
 }
 
 struct HunkView {
@@ -147,6 +161,9 @@ impl App {
             hunk_view: None,
             job: None,
             job_done: None,
+            retry_in_terminal: None,
+            terminal_request: None,
+            confirm_quit: false,
         };
         app.reload();
         // Start the Branches screen on the branch you're on, and History on the commit you're on.
@@ -271,7 +288,17 @@ impl App {
 
     fn show_result(&mut self, title: String, text: String, ok: bool) {
         self.reload();
-        let text = if text.trim().is_empty() { "(done)".to_string() } else { text };
+        let mut text = if text.trim().is_empty() { "(done)".to_string() } else { text };
+        self.retry_in_terminal = None;
+        if !ok && needs_sign_in(&text) {
+            // The screen can't ask for a password or a key's passphrase; the terminal can.
+            text.push_str(&format!(
+                "\n\nThis needs a sign-in, which can't be typed here. Press t to run `{title}` in the terminal,\n\
+                 where git's sign-in (or your SSH key) can ask you; once it's saved, F, L and P work here too.\n\
+                 For GitHub, the password is a personal access token, not your account password."
+            ));
+            self.retry_in_terminal = Some(title.trim_start_matches("copse ").split(' ').map(String::from).collect());
+        }
         self.message = format!("{} {}", if ok { "✓" } else { "✗" }, title);
         self.mode = Mode::Output { title, text, ok, scroll: 0 };
     }
@@ -526,7 +553,10 @@ impl App {
             Mode::Output { title, text, ok, scroll } => match k.code {
                 KeyCode::Down | KeyCode::Char('j') => self.mode = Mode::Output { title, text, ok, scroll: scroll.saturating_add(1) },
                 KeyCode::Up | KeyCode::Char('k') => self.mode = Mode::Output { title, text, ok, scroll: scroll.saturating_sub(1) },
-                _ => {} // any other key closes it
+                KeyCode::Char('t') if self.retry_in_terminal.is_some() => {
+                    self.terminal_request = self.retry_in_terminal.take();
+                }
+                _ => self.retry_in_terminal = None, // any other key closes it
             },
             Mode::Help => {}
             Mode::Normal if self.hunk_view.is_some() => self.hunk_key(k),
@@ -536,8 +566,20 @@ impl App {
     }
 
     fn normal_key(&mut self, k: KeyEvent) {
+        if self.confirm_quit && !matches!(k.code, KeyCode::Char('q') | KeyCode::Esc) {
+            self.confirm_quit = false;
+            self.message = "Staying.".into();
+            return;
+        }
         match k.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') | KeyCode::Esc => match &self.job {
+                // Quitting would leave it running unseen: ask first.
+                Some(job) if !self.confirm_quit => {
+                    self.confirm_quit = true;
+                    self.message = format!("{} is still running. Quit anyway (it finishes on its own, but you won't see what it says)? q again to quit, any other key to stay", job.title);
+                }
+                _ => self.quit = true,
+            },
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char(c @ '1'..='4') => self.switch(TABS[(c as u8 - b'1') as usize]),
             KeyCode::Tab => self.switch(TABS[(TABS.iter().position(|t| *t == self.tab).unwrap() + 1) % 4]),
@@ -739,7 +781,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
         Mode::Commit { what, summary, body, in_body } => {
             let body_lines: Vec<&str> = body.split('\n').collect();
-            let height = (body_lines.len() as u16 + 7).clamp(9, f.area().height.saturating_sub(2));
+            let height = (body_lines.len() as u16 + 7).max(9).min(f.area().height.saturating_sub(2)); // (never panics on a tiny terminal)
             let area = centered(f.area(), 80, height);
             f.render_widget(Clear, area);
             let dim = Style::default().fg(Color::DarkGray);
@@ -756,7 +798,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             }
             let hint = if *in_body { "enter new line · ctrl-s commit · tab back to the summary · esc cancel" } else { "enter commit · tab add a description · esc cancel" };
             let inner_h = area.height.saturating_sub(3) as usize;
-            if lines.len() > inner_h {
+            if lines.len() > inner_h && inner_h >= 2 {
                 lines.drain(2..2 + lines.len() - inner_h); // keep the summary, show the end of the description
             }
             lines.push(Line::styled(hint, dim));
@@ -773,7 +815,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             );
         }
         Mode::Output { title, text, ok, scroll } => {
-            let height = (text.lines().count() as u16 + 2).clamp(3, f.area().height.saturating_sub(4));
+            let height = (text.lines().count() as u16 + 2).max(3).min(f.area().height.saturating_sub(4)); // (never panics on a tiny terminal)
             let area = centered(f.area(), 90, height);
             f.render_widget(Clear, area);
             let color = if *ok { Color::Green } else { Color::Red };
@@ -975,6 +1017,9 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(
                     app.handle(k);
                 }
             }
+            if let Some(args) = app.terminal_request.take() {
+                run_in_terminal(terminal, app, &args)?;
+            }
         } else {
             // Pick up changes made outside (an editor saving a file) every few seconds.
             idle += 1;
@@ -983,6 +1028,27 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(
             }
         }
     }
+    Ok(())
+}
+
+/// Leave the screen, run `copse ARGS` in the plain terminal (so it can ask for a
+/// sign-in), wait for Enter, and come back.
+fn run_in_terminal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, args: &[String]) -> Result<()> {
+    use ratatui::crossterm::{execute, terminal as ct};
+    ct::disable_raw_mode()?;
+    execute!(std::io::stdout(), ct::LeaveAlternateScreen)?;
+    println!("Running copse {} (sign in if it asks)...\n", args.join(" "));
+    let status = std::process::Command::new(&app.exe).args(args).current_dir(&app.repo.root).status();
+    let ok = matches!(&status, Ok(s) if s.success());
+    print!("\n{} Press Enter to go back to copse. ", if ok { "Done." } else { "It didn't work (see above)." });
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    execute!(std::io::stdout(), ct::EnterAlternateScreen)?;
+    ct::enable_raw_mode()?;
+    terminal.clear()?;
+    app.reload();
+    app.message = format!("{} copse {} (in the terminal)", if ok { "✓" } else { "✗" }, args.join(" "));
     Ok(())
 }
 
@@ -1057,6 +1123,10 @@ pub fn replay(keys: &str, size: &str) -> Result<()> {
             t => anyhow::bail!("unknown key {t:?}"),
         };
         press(&mut app, code);
+        if let Some(args) = app.terminal_request.take() {
+            // No terminal to hand over to here: say what would happen.
+            app.message = format!("(would run copse {} in the terminal)", args.join(" "));
+        }
         if app.quit {
             break;
         }
