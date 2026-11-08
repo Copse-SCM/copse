@@ -20,6 +20,8 @@ tar xzf copse-*.tar.gz && sudo mv copse-*/copse /usr/local/bin/
 copse version
 ```
 
+On a Mac, a download from the browser is quarantined, and since copse isn't signed with an Apple developer certificate yet, macOS refuses to open it until you clear that: `xattr -d com.apple.quarantine /usr/local/bin/copse`. (Downloads with `curl` or `gh release download` aren't quarantined.)
+
 `SHA256SUMS` in the release lets you check the download (`shasum -a 256 -c SHA256SUMS --ignore-missing`). Or build it yourself:
 
 ```bash
