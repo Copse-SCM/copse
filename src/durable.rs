@@ -85,7 +85,23 @@ pub fn note_dir(dir: &Path) {
 pub fn flush_pending() -> io::Result<()> {
     let dirs: Vec<PathBuf> = pending().lock().unwrap().drain().collect();
     for d in dirs {
-        sync_dir(&d)?;
+        match sync_dir(&d) {
+            // A folder deleted since (a temporary one, say) has nothing left to flush.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            other => other?,
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_folder_deleted_before_flushing_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("copse-durable-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        super::note_dir(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        super::flush_pending().unwrap();
+    }
 }
