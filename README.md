@@ -54,3 +54,7 @@ copse                         # the interactive screen
 ## Status
 
 Version 0.1, for people who like trying new tools. 1,019 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.
+
+## License
+
+copse is licensed under the [Apache License 2.0](LICENSE): you can use, change and share it, including in forks. Keep the [NOTICE](NOTICE) file so the original stays credited. The name "copse" and the logo aren't covered by the license, so a fork needs a name and logo of its own.
