@@ -121,7 +121,7 @@ Before relying on copse for real work: weeks of use on a backed-up project (this
 ## 4. After parity: a built-in TUI ✅
 
 `copse` on its own (or `copse ui`) opens a terminal interface (ratatui). Every action runs the real `copse` command and shows its output; `tests/tui.sh` drives it with `copse ui --replay` and checks each action with the command line:
-- **Changes:** what changed, the diff alongside, pick files to commit, write the message.
+- **Changes:** what changed, the diff alongside, pick files (or single changes within a file) to commit, write a summary and description.
 - **History:** the commit graph; select a commit to see what it changed.
-- **Branches:** switch, create, delete, merge, pull, push.
+- **Branches:** switch, create, delete, merge; fetch, pull and push run in the background.
 - **Undo timeline:** the reflog as a timeline, with one-key undo. No other version-control tool makes undo this visible.

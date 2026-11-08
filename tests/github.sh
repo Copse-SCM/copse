@@ -155,7 +155,7 @@ same "$(cps log --first-parent -n 50 | grep -v UTC | sed 's/^ *//' | grep -v '^$
 cps log -n 50 | has "topic work" && ok "the full log includes commits from merged branches, as git's does" || fail "line $LINENO: a step before this check failed"
 same "$(cps status | tail -1)" "Nothing changed." "clone is clean"
 same "$(cps push origin)" "Everything up to date." "pushing it straight back changes nothing (every git id preserved)"
-same "$(cps remote)" "origin  $WORK/hub.git  (git)" "origin is recorded as a git remote"
+same "$(cps remote)" "origin  $(cd "$WORK" && pwd -P)/hub.git  (git)" "origin is recorded as a git remote"
 cps checkout origin/topic >/dev/null && [[ -f topic.txt ]] && ok "other branches arrive too (origin/topic)" && cps checkout main >/dev/null || fail "line $LINENO: a step before this check failed"
 cd ..
 rm -rf tclone-ref && COPSE_NO_OFS_DELTA=1 cps clone hub.git tclone-ref >/dev/null 2>&1

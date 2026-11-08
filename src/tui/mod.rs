@@ -1,6 +1,6 @@
 //! `copse` on its own: a terminal interface over the same commands.
 //!
-//!   1 Changes    what changed, with the diff; pick files, commit, discard
+//!   1 Changes    what changed, with the diff; pick files or parts of them, commit, discard
 //!   2 History    the commit graph, with each commit's details and diff
 //!   3 Branches   switch, create, delete, merge; pull and push
 //!   4 Undo       every move of HEAD as a timeline; undo, or go back to any point
@@ -22,8 +22,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,7 +51,6 @@ impl Tab {
 /// What an Enter in a text box or a "y" in a confirmation does.
 #[derive(Clone, Debug)]
 enum Pending {
-    Commit,
     NewBranch { at: Option<String> },
     /// Run `copse ARGS`.
     Run(Vec<String>),
@@ -60,6 +60,8 @@ enum Pending {
 enum Mode {
     Normal,
     Input { prompt: String, text: String, then: Pending },
+    /// The commit message: a summary line, and a description below it (tab moves between them).
+    Commit { what: String, summary: String, body: String, in_body: bool },
     Confirm { question: String, then: Pending },
     Output { title: String, text: String, ok: bool, scroll: u16 },
     Help,
@@ -83,6 +85,26 @@ struct App {
     detail: (String, Vec<String>),
     message: String,
     quit: bool,
+    /// Files with only some of their changes picked: which hunks.
+    hunk_picks: BTreeMap<String, Vec<bool>>,
+    /// Picking the changes within one file (enter on a modified file).
+    hunk_view: Option<HunkView>,
+    /// A fetch, pull or push running in the background, so the screen doesn't freeze.
+    job: Option<Job>,
+    /// A finished background job, shown when nothing else is on screen.
+    job_done: Option<(String, String, bool)>,
+}
+
+struct HunkView {
+    path: String,
+    hunks: Vec<crate::hunks::Hunk>,
+    take: Vec<bool>,
+    sel: usize,
+}
+
+struct Job {
+    title: String,
+    rx: mpsc::Receiver<(bool, String)>,
 }
 
 impl App {
@@ -104,6 +126,10 @@ impl App {
             detail: (String::new(), vec![]),
             message: "? for help · q to quit".into(),
             quit: false,
+            hunk_picks: BTreeMap::new(),
+            hunk_view: None,
+            job: None,
+            job_done: None,
         };
         app.reload();
         // Start the Branches screen on the branch you're on, and History on the commit you're on.
@@ -127,6 +153,7 @@ impl App {
         self.changes = data::load_changes(&self.repo).unwrap_or_default();
         let present: BTreeSet<String> = self.changes.iter().map(|c| c.path.clone()).collect();
         self.picked.retain(|p| present.contains(p));
+        self.hunk_picks.retain(|p, _| present.contains(p));
         self.history = data::load_history(&self.exe, &self.repo.root, 500);
         self.branches = data::load_branches(&self.repo).unwrap_or_default();
         self.undo = data::load_undo(&self.repo).unwrap_or_default();
@@ -216,13 +243,68 @@ impl App {
 
     /// Run a copse command, show its output, and re-read everything.
     fn run(&mut self, args: &[String]) {
+        if let Some(job) = &self.job {
+            self.message = format!("Wait: {} is still running.", job.title);
+            return;
+        }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let (ok, text) = data::run_copse(&self.exe, &self.repo.root, &refs);
-        let title = format!("copse {}", args.join(" "));
+        self.show_result(format!("copse {}", args.join(" ")), text, ok);
+    }
+
+    fn show_result(&mut self, title: String, text: String, ok: bool) {
         self.reload();
         let text = if text.trim().is_empty() { "(done)".to_string() } else { text };
         self.message = format!("{} {}", if ok { "✓" } else { "✗" }, title);
         self.mode = Mode::Output { title, text, ok, scroll: 0 };
+    }
+
+    /// Run a slow (network) command in the background: the screen keeps working,
+    /// and its output shows when it's done.
+    fn run_in_background(&mut self, args: &[&str]) {
+        if let Some(job) = &self.job {
+            self.message = format!("Wait: {} is still running.", job.title);
+            return;
+        }
+        let title = format!("copse {}", args.join(" "));
+        let (tx, rx) = mpsc::channel();
+        let (exe, root) = (self.exe.clone(), self.repo.root.clone());
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        std::thread::spawn(move || {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = tx.send(data::run_copse(&exe, &root, &refs));
+        });
+        self.message = format!("⟳ {title}… (keep going; it shows here when it's done)");
+        self.job = Some(Job { title, rx });
+    }
+
+    /// Check on the background job; returns true if something changed.
+    fn poll_job(&mut self, wait: bool) -> bool {
+        let Some(job) = &self.job else { return self.show_job_done() };
+        let got = if wait { job.rx.recv().ok() } else { job.rx.try_recv().ok() };
+        let got = match got {
+            Some(r) => Some(r),
+            None if wait => Some((false, "(it stopped without saying anything)".into())),
+            None => match job.rx.try_recv() {
+                Err(mpsc::TryRecvError::Disconnected) => Some((false, "(it stopped without saying anything)".into())),
+                _ => None,
+            },
+        };
+        let Some((ok, text)) = got else { return false };
+        let title = self.job.take().unwrap().title;
+        self.job_done = Some((title, text, ok));
+        self.show_job_done();
+        true
+    }
+
+    /// Show a finished job's output once nothing else is open.
+    fn show_job_done(&mut self) -> bool {
+        if !matches!(self.mode, Mode::Normal) || self.job_done.is_none() {
+            return false;
+        }
+        let (title, text, ok) = self.job_done.take().unwrap();
+        self.show_result(title, text, ok);
+        true
     }
 
     fn confirm(&mut self, question: impl Into<String>, args: Vec<&str>) {
@@ -232,17 +314,6 @@ impl App {
     fn finish(&mut self, then: Pending, text: String) {
         self.mode = Mode::Normal;
         match then {
-            Pending::Commit => {
-                let msg = text.trim();
-                if msg.is_empty() {
-                    self.message = "Commit cancelled: the message was empty.".into();
-                    return;
-                }
-                let mut args = vec!["commit".to_string(), "-m".into(), msg.to_string()];
-                args.extend(self.picked.iter().cloned());
-                self.picked.clear();
-                self.run(&args);
-            }
             Pending::NewBranch { at } => {
                 let name = text.trim();
                 if name.is_empty() {
@@ -254,6 +325,93 @@ impl App {
                 self.run(&args);
             }
             Pending::Run(args) => self.run(&args),
+        }
+    }
+
+    /// Commit what's picked (whole files, and parts of files), or everything.
+    fn commit(&mut self, summary: &str, body: &str) {
+        let (summary, body) = (summary.trim(), body.trim_end());
+        if summary.is_empty() {
+            self.message = "Commit cancelled: the summary line was empty.".into();
+            return;
+        }
+        let mut msg = summary.to_string();
+        if !body.trim().is_empty() {
+            msg += "\n\n";
+            msg += body.trim_start_matches('\n');
+        }
+        let mut args = vec!["commit".to_string(), "-m".into(), msg];
+        if self.hunk_picks.is_empty() {
+            args.extend(self.picked.iter().cloned());
+        } else {
+            for p in &self.picked {
+                args.push(format!("--pick=*:{p}"));
+            }
+            for (p, take) in &self.hunk_picks {
+                args.push(format!("--pick={}:{p}", take.iter().map(|t| if *t { '1' } else { '0' }).collect::<String>()));
+            }
+        }
+        if self.job.is_some() {
+            return self.run(&args); // refused with a "wait" message; keep the picks
+        }
+        self.picked.clear();
+        self.hunk_picks.clear();
+        self.run(&args);
+    }
+
+    /// Open the hunk picker on a modified file.
+    fn open_hunks(&mut self, path: &str) {
+        match data::load_hunks(&self.repo, path) {
+            Ok(Some(hunks)) => {
+                let take = match self.hunk_picks.get(path) {
+                    Some(t) if t.len() == hunks.len() => t.clone(),
+                    _ => vec![self.picked.contains(path); hunks.len()],
+                };
+                self.message = format!("{}: {} change(s) — space picks one", path, hunks.len());
+                self.hunk_view = Some(HunkView { path: path.to_string(), hunks, take, sel: 0 });
+            }
+            Ok(None) => self.message = format!("{path} can only be committed whole: space picks it."),
+            Err(e) => self.message = format!("Couldn't read {path}'s changes: {e}"),
+        }
+    }
+
+    /// Close the hunk picker, keeping what was picked.
+    fn close_hunks(&mut self) {
+        let Some(v) = self.hunk_view.take() else { return };
+        self.picked.remove(&v.path);
+        self.hunk_picks.remove(&v.path);
+        let n = v.take.iter().filter(|t| **t).count();
+        if n == v.take.len() {
+            self.picked.insert(v.path.clone());
+        } else if n > 0 {
+            self.hunk_picks.insert(v.path.clone(), v.take);
+        }
+        self.message = match n {
+            0 => format!("Nothing picked in {}.", v.path),
+            n if n == v.hunks.len() => format!("Picked all of {}.", v.path),
+            n => format!("Picked {n} of {} change(s) in {}.", v.hunks.len(), v.path),
+        };
+    }
+
+    fn hunk_key(&mut self, k: KeyEvent) {
+        let Some(v) = self.hunk_view.as_mut() else { return };
+        match k.code {
+            KeyCode::Down | KeyCode::Char('j') => v.sel = (v.sel + 1).min(v.hunks.len() - 1),
+            KeyCode::Up | KeyCode::Char('k') => v.sel = v.sel.saturating_sub(1),
+            KeyCode::Char(' ') => {
+                v.take[v.sel] = !v.take[v.sel];
+                v.sel = (v.sel + 1).min(v.hunks.len() - 1);
+            }
+            KeyCode::Char('a') => {
+                let all = v.take.iter().all(|t| *t);
+                v.take.iter_mut().for_each(|t| *t = !all);
+            }
+            KeyCode::Char('c') => {
+                self.close_hunks();
+                self.screen_key('c');
+            }
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('h') => self.close_hunks(),
+            _ => {}
         }
     }
 
@@ -278,6 +436,32 @@ impl App {
                 }
                 self.mode = Mode::Input { prompt, text, then };
             }
+            Mode::Commit { what, mut summary, mut body, mut in_body } => {
+                let send = (k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('s')) || (k.modifiers.contains(KeyModifiers::ALT) && k.code == KeyCode::Enter);
+                match k.code {
+                    _ if send => return self.commit(&summary, &body),
+                    KeyCode::Enter if !in_body => return self.commit(&summary, &body),
+                    KeyCode::Enter => body.push('\n'),
+                    KeyCode::Esc => {
+                        self.message = "Cancelled.".into();
+                        return;
+                    }
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Down if !in_body => in_body = true,
+                    KeyCode::Tab | KeyCode::BackTab => in_body = false,
+                    KeyCode::Up if in_body && !body.contains('\n') => in_body = false,
+                    KeyCode::Backspace if in_body && body.is_empty() => in_body = false,
+                    KeyCode::Backspace if in_body => {
+                        body.pop();
+                    }
+                    KeyCode::Backspace => {
+                        summary.pop();
+                    }
+                    KeyCode::Char(c) if in_body => body.push(c),
+                    KeyCode::Char(c) => summary.push(c),
+                    _ => {}
+                }
+                self.mode = Mode::Commit { what, summary, body, in_body };
+            }
             Mode::Confirm { question, then } => match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => self.finish(then, String::new()),
                 KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => self.message = "Cancelled.".into(),
@@ -289,8 +473,10 @@ impl App {
                 _ => {} // any other key closes it
             },
             Mode::Help => {}
+            Mode::Normal if self.hunk_view.is_some() => self.hunk_key(k),
             Mode::Normal => self.normal_key(k),
         }
+        self.show_job_done();
     }
 
     fn normal_key(&mut self, k: KeyEvent) {
@@ -310,9 +496,9 @@ impl App {
                 self.reload();
                 self.message = "Refreshed.".into();
             }
-            KeyCode::Char('F') => self.run(&["fetch".into()]),
-            KeyCode::Char('L') => self.run(&["pull".into()]),
-            KeyCode::Char('P') => self.run(&["push".into()]),
+            KeyCode::Char('F') => self.run_in_background(&["fetch"]),
+            KeyCode::Char('L') => self.run_in_background(&["pull"]),
+            KeyCode::Char('P') => self.run_in_background(&["push"]),
             KeyCode::Char(c) => self.screen_key(c),
             KeyCode::Enter => self.screen_key('\n'),
             _ => {}
@@ -333,13 +519,21 @@ impl App {
                 match c {
                     ' ' => {
                         if let Some(ch) = cur {
-                            if !self.picked.remove(&ch.path) {
+                            // A file with some changes picked counts as picked: space clears it.
+                            let had = self.picked.remove(&ch.path) | self.hunk_picks.remove(&ch.path).is_some();
+                            if !had {
                                 self.picked.insert(ch.path);
                             }
                             self.move_by(1);
                         }
                     }
+                    '\n' | 'l' => match cur {
+                        Some(ch) if ch.kind == 'M' => self.open_hunks(&ch.path),
+                        Some(ch) => self.message = format!("{} can only be committed whole: space picks it.", ch.path),
+                        None => {}
+                    },
                     'a' => {
+                        self.hunk_picks.clear();
                         if self.picked.len() == self.changes.len() {
                             self.picked.clear();
                         } else {
@@ -351,8 +545,14 @@ impl App {
                             self.message = "Nothing to commit.".into();
                             return;
                         }
-                        let what = if self.picked.is_empty() { format!("all {} change(s)", self.changes.len()) } else { format!("{} picked file(s)", self.picked.len()) };
-                        self.mode = Mode::Input { prompt: format!("Commit {what}: message"), text: String::new(), then: Pending::Commit };
+                        let parts = self.hunk_picks.len();
+                        let what = match (self.picked.len(), parts) {
+                            (0, 0) => format!("all {} change(s)", self.changes.len()),
+                            (f, 0) => format!("{f} picked file(s)"),
+                            (0, p) => format!("picked changes in {p} file(s)"),
+                            (f, p) => format!("{f} picked file(s), and picked changes in {p} more"),
+                        };
+                        self.mode = Mode::Commit { what, summary: String::new(), body: String::new(), in_body: false };
                     }
                     'x' => {
                         if let Some(ch) = cur {
@@ -456,11 +656,16 @@ fn draw(f: &mut Frame, app: &mut App) {
         Tab::Branches => " Recent commits ",
         Tab::Undo => " What it changed ",
     };
-    let lines: Vec<Line> = app.detail.1.iter().map(|l| diff_line(l)).collect();
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)).scroll((app.detail_scroll, 0)), detail_area);
+    if let Some(v) = &app.hunk_view {
+        draw_hunks(f, v, detail_area);
+    } else {
+        let lines: Vec<Line> = app.detail.1.iter().map(|l| diff_line(l)).collect();
+        f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)).scroll((app.detail_scroll, 0)), detail_area);
+    }
 
     let hints = match app.tab {
-        Tab::Changes => "space pick · a all · c commit · x discard · s stash",
+        _ if app.hunk_view.is_some() => "j/k move · space pick this change · a all/none · enter done · c commit",
+        Tab::Changes => "space pick · enter pick parts · a all · c commit · x discard · s stash",
         Tab::History => "enter/o check out · v revert · p cherry-pick · b branch here",
         Tab::Branches => "enter switch · n new · d delete · m merge",
         Tab::Undo => "u undo last · enter go back to this point",
@@ -474,6 +679,31 @@ fn draw(f: &mut Frame, app: &mut App) {
             let area = centered(f.area(), 70, 3);
             f.render_widget(Clear, area);
             f.render_widget(Paragraph::new(format!("{text}▏")).block(Block::default().borders(Borders::ALL).title(format!(" {prompt} (enter to finish, esc to cancel) "))), area);
+        }
+        Mode::Commit { what, summary, body, in_body } => {
+            let body_lines: Vec<&str> = body.split('\n').collect();
+            let height = (body_lines.len() as u16 + 7).clamp(9, f.area().height.saturating_sub(2));
+            let area = centered(f.area(), 80, height);
+            f.render_widget(Clear, area);
+            let dim = Style::default().fg(Color::DarkGray);
+            let cursor = |on: bool| if on { "▏" } else { "" };
+            let mut lines = vec![
+                Line::from(vec![Span::styled("Summary  ", dim), Span::styled(format!("{summary}{}", cursor(!in_body)), Style::default().add_modifier(Modifier::BOLD))]),
+                Line::styled("─".repeat(area.width.saturating_sub(2) as usize), dim),
+            ];
+            if body.is_empty() && !in_body {
+                lines.push(Line::styled("(a longer description, if it needs one: tab to write it)", dim));
+            } else {
+                let last = body_lines.len() - 1;
+                lines.extend(body_lines.iter().enumerate().map(|(i, l)| Line::from(format!("{l}{}", cursor(*in_body && i == last)))));
+            }
+            let hint = if *in_body { "enter new line · ctrl-s commit · tab back to the summary · esc cancel" } else { "enter commit · tab add a description · esc cancel" };
+            let inner_h = area.height.saturating_sub(3) as usize;
+            if lines.len() > inner_h {
+                lines.drain(2..2 + lines.len() - inner_h); // keep the summary, show the end of the description
+            }
+            lines.push(Line::styled(hint, dim));
+            f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" Commit {what} "))), area);
         }
         Mode::Confirm { question, .. } => {
             let area = centered(f.area(), 70, 4);
@@ -502,17 +732,44 @@ fn draw(f: &mut Frame, app: &mut App) {
                         Move: j/k or arrows · g/G top/bottom · J/K or PgDn/PgUp scroll the right-hand pane\n\
                         Anywhere: F fetch · L pull · P push · r refresh · q quit\n\n\
                         Changes:  space pick a file (commit only picked ones) · a pick all/none\n          \
-                        c commit (asks for a message) · x discard a file's changes · s stash\n\
+                        enter pick some of a file's changes (space on each, enter when done)\n          \
+                        c commit (summary, then tab for a description) · x discard a file's changes · s stash\n\
                         History:  enter/o check out · v revert · p cherry-pick · b make a branch here\n\
                         Branches: enter switch · n new branch · d delete · m merge into current\n\
                         Undo:     u undo the last change (again to redo) · enter go back to that point\n\n\
                         Every action runs the same copse command you'd type, and shows what it said.\n\
                         Anything that would lose work keeps a backup (a stash), and undo can reverse it.";
-            let area = centered(f.area(), 90, 15);
+            let area = centered(f.area(), 90, 16);
             f.render_widget(Clear, area);
             f.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Help (any key to close) ")), area);
         }
     }
+}
+
+/// The hunk picker: each change in the file, with whether it's picked.
+fn draw_hunks(f: &mut Frame, v: &HunkView, area: Rect) {
+    let mut lines = Vec::new();
+    let (mut sel_at, mut sel_end) = (0, 0);
+    for (i, h) in v.hunks.iter().enumerate() {
+        if i == v.sel {
+            sel_at = lines.len();
+            sel_end = sel_at + h.lines.len() + 1;
+        }
+        let mark = if v.take[i] { "[x]" } else { "[ ]" };
+        let mut style = Style::default().fg(Color::Cyan);
+        if i == v.sel {
+            style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::styled(format!("{} {mark} {}  ({} of {})", if i == v.sel { "▶" } else { " " }, h.header, i + 1, v.hunks.len()), style));
+        lines.extend(h.lines.iter().map(|(m, l)| diff_line(&format!("{m}{l}"))));
+        lines.push(Line::raw(""));
+    }
+    let picked = v.take.iter().filter(|t| **t).count();
+    let title = format!(" {}: {picked} of {} change(s) picked ", v.path, v.hunks.len());
+    // Scroll only as far as it takes to show the selected change.
+    let visible = area.height.saturating_sub(2) as usize;
+    let scroll = if sel_end <= visible { 0 } else { sel_at.saturating_sub(1).min(sel_end.saturating_sub(visible)) as u16 };
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)).scroll((scroll, 0)), area);
 }
 
 fn centered(area: Rect, width_pct: u16, height: u16) -> Rect {
@@ -524,7 +781,8 @@ fn centered(area: Rect, width_pct: u16, height: u16) -> Rect {
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let (title, items): (String, Vec<ListItem>) = match app.tab {
         Tab::Changes => {
-            let title = if app.picked.is_empty() { " Changes ".to_string() } else { format!(" Changes ({} picked) ", app.picked.len()) };
+            let n = app.picked.len() + app.hunk_picks.len();
+            let title = if n == 0 { " Changes ".to_string() } else { format!(" Changes ({n} picked) ") };
             let items = if app.changes.is_empty() {
                 vec![ListItem::new(Line::styled("Nothing changed since the last commit.", Style::default().fg(Color::DarkGray)))]
             } else {
@@ -536,7 +794,13 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                             'D' => Color::Red,
                             _ => Color::Yellow,
                         };
-                        let mark = if app.picked.contains(&c.path) { "[x] " } else { "[ ] " };
+                        let mark = if app.picked.contains(&c.path) {
+                            "[x] "
+                        } else if app.hunk_picks.contains_key(&c.path) {
+                            "[~] " // some of its changes
+                        } else {
+                            "[ ] "
+                        };
                         ListItem::new(Line::from(vec![Span::raw(mark), Span::styled(format!("{} ", c.kind), Style::default().fg(color)), Span::raw(c.path.clone())]))
                     })
                     .collect()
@@ -621,10 +885,15 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 // ---------------------------------------------------------------- running
 
 fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
-    let mut idle = 0u32;
+    let mut idle = 0u64;
     while !app.quit {
         terminal.draw(|f| draw(f, app))?;
-        if event::poll(Duration::from_millis(500))? {
+        // Check on a background job often; otherwise wake twice a second.
+        let tick = if app.job.is_some() { 100 } else { 500 };
+        if app.poll_job(false) {
+            continue;
+        }
+        if event::poll(Duration::from_millis(tick))? {
             idle = 0;
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
@@ -634,7 +903,7 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(
         } else {
             // Pick up changes made outside (an editor saving a file) every few seconds.
             idle += 1;
-            if idle % 6 == 0 && matches!(app.mode, Mode::Normal) {
+            if idle % (3000 / tick) == 0 && matches!(app.mode, Mode::Normal) && app.hunk_view.is_none() {
                 app.reload();
             }
         }
@@ -665,15 +934,33 @@ pub fn run() -> Result<()> {
 }
 
 /// `copse ui --replay KEYS [--size WxH]`: press KEYS (comma-separated: j, k, enter,
-/// esc, space, tab, backtab, up, down, pgdn, pgup, "text:some words"), then print
-/// the screen as text. For tests: the same App, drawn to an in-memory terminal.
+/// esc, space, tab, backtab, up, down, pgdn, pgup, ctrl-s, alt-enter, "text:some
+/// words"), then print the screen as text. For tests: the same App, drawn to an
+/// in-memory terminal. A background job is waited for before the next key, unless
+/// "busy" is one of the keys: then nothing waits, to see the screen while it runs.
 pub fn replay(keys: &str, size: &str) -> Result<()> {
     let (w, h) = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).unwrap_or((120, 30));
     let mut app = App::new(data::exe())?;
     let mut term = Terminal::new(ratatui::backend::TestBackend::new(w, h))?;
     let press = |app: &mut App, code: KeyCode| app.handle(KeyEvent::new(code, KeyModifiers::NONE));
-    for token in keys.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+    let tokens: Vec<&str> = keys.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
+    let busy = tokens.contains(&"busy");
+    for token in tokens.iter().copied().filter(|t| *t != "busy") {
         term.draw(|f| draw(f, &mut app))?;
+        if !busy {
+            app.poll_job(true);
+        }
+        match token {
+            "ctrl-s" => {
+                app.handle(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+                continue;
+            }
+            "alt-enter" => {
+                app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+                continue;
+            }
+            _ => {}
+        }
         if let Some(text) = token.strip_prefix("text:") {
             for c in text.chars() {
                 press(&mut app, KeyCode::Char(c));
@@ -698,6 +985,9 @@ pub fn replay(keys: &str, size: &str) -> Result<()> {
         if app.quit {
             break;
         }
+    }
+    if !busy {
+        app.poll_job(true);
     }
     term.draw(|f| draw(f, &mut app))?;
     let buf = term.backend().buffer();

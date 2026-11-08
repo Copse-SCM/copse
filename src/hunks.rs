@@ -9,7 +9,7 @@ use crate::cmd::paint;
 use crate::objects::{Id, Kind, Mode};
 use crate::repo::Repo;
 use crate::worktree::{Changes, File, Index};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use similar::{DiffOp, DiffTag, TextDiff};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
@@ -74,7 +74,7 @@ pub fn apply(old: &str, new: &str, take: &[bool]) -> String {
     out
 }
 
-fn text(data: &[u8]) -> Option<&str> {
+pub fn text(data: &[u8]) -> Option<&str> {
     std::str::from_utf8(data).ok().filter(|t| !t.contains('\0'))
 }
 
@@ -88,6 +88,14 @@ fn show_hunk(path: &str, h: &Hunk, n: usize, of: usize) {
             _ => s,
         });
     }
+}
+
+/// What `pick` asks about.
+pub enum Question<'a> {
+    /// A whole file: new, deleted, not text, or only its mode changed. Answers y/n/q.
+    Whole { path: &'a str, prompt: String },
+    /// One hunk of a text file (`n` of `of`, from 1). Answers y/n/a/d/q.
+    Hunk { path: &'a str, hunk: &'a Hunk, n: usize, of: usize },
 }
 
 /// Ask a question; returns the first letter answered (EOF counts as q).
@@ -104,9 +112,61 @@ fn ask(input: &mut dyn BufRead, question: &str) -> char {
     }
 }
 
+/// Answers typed at the terminal: `copse commit -p`.
+pub fn ask_terminal(input: &mut dyn BufRead) -> impl FnMut(&Question) -> Result<char> + '_ {
+    move |q| {
+        Ok(match q {
+            Question::Whole { prompt, .. } => ask(input, &format!("{prompt} [y]es [n]o [q]uit:")),
+            Question::Hunk { path, hunk, n, of } => {
+                show_hunk(path, hunk, *n, *of);
+                ask(input, "Commit this change? [y]es [n]o [a]ll the rest of this file [d]one with this file [q]uit:")
+            }
+        })
+    }
+}
+
+/// What to take from one file, picked beforehand (the TUI's Changes screen).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Choice {
+    All,
+    /// One entry per hunk, in order.
+    Hunks(Vec<bool>),
+}
+
+/// "*:PATH" (the whole file) or "0110:PATH" (one digit per hunk): `commit --pick`.
+pub fn parse_choice(spec: &str) -> Result<(String, Choice)> {
+    let Some((how, path)) = spec.split_once(':') else { bail!("--pick takes *:PATH or 0101:PATH, not {spec:?}") };
+    let choice = match how {
+        "*" => Choice::All,
+        bits if !bits.is_empty() && bits.bytes().all(|b| b == b'0' || b == b'1') => Choice::Hunks(bits.bytes().map(|b| b == b'1').collect()),
+        _ => bail!("--pick takes *:PATH or 0101:PATH, not {spec:?}"),
+    };
+    Ok((path.to_string(), choice))
+}
+
+/// Answers decided beforehand. A file whose hunks no longer match what was picked
+/// (it changed since) is refused rather than guessed at.
+pub fn answers(choices: &BTreeMap<String, Choice>) -> impl FnMut(&Question) -> Result<char> + '_ {
+    move |q| {
+        Ok(match q {
+            Question::Whole { path, .. } => match choices.get(*path) {
+                Some(Choice::All) => 'y',
+                Some(Choice::Hunks(_)) => bail!("{path} can only be committed whole now (it changed since its changes were picked); pick it again"),
+                None => 'n',
+            },
+            Question::Hunk { path, n, of, .. } => match choices.get(*path) {
+                Some(Choice::All) => 'a',
+                Some(Choice::Hunks(take)) if take.len() == *of => if take[n - 1] { 'y' } else { 'n' },
+                Some(Choice::Hunks(take)) => bail!("{path} now has {of} change(s), not the {} that were picked from (it changed since); pick again", take.len()),
+                None => 'd',
+            },
+        })
+    }
+}
+
 /// Go through the changes in scope, asking about each. Returns what to commit for
 /// each path the user picked something in: Some((mode, blob)) or None (deleted).
-pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: &dyn Fn(&str) -> bool, input: &mut dyn BufRead) -> Result<BTreeMap<String, Option<(Mode, Id)>>> {
+pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: &dyn Fn(&str) -> bool, answer: &mut dyn FnMut(&Question) -> Result<char>) -> Result<BTreeMap<String, Option<(Mode, Id)>>> {
     let by_path: HashMap<&str, &File> = files.iter().map(|f| (f.path.as_str(), f)).collect();
     let mut paths: Vec<(&String, char)> = Vec::new();
     paths.extend(ch.modified.iter().map(|p| (p, 'M')));
@@ -116,11 +176,11 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
     paths.sort();
     let mut chosen = BTreeMap::new();
     'files: for (path, kind) in paths {
-        let whole = |q: &str, input: &mut dyn BufRead| -> char { ask(input, &format!("{q} [y]es [n]o [q]uit:")) };
+        let mut whole = |prompt: String| answer(&Question::Whole { path, prompt });
         match kind {
             'A' => {
                 let f = by_path[path.as_str()];
-                match whole(&format!("{} {path}: commit this new file?", paint("32", "A")), input) {
+                match whole(format!("{} {path}: commit this new file?", paint("32", "A")))? {
                     'y' => {
                         chosen.insert(path.clone(), Some((f.mode, f.id)));
                     }
@@ -128,7 +188,7 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                     _ => {}
                 }
             }
-            'D' => match whole(&format!("{} {path}: commit its deletion?", paint("31", "D")), input) {
+            'D' => match whole(format!("{} {path}: commit its deletion?", paint("31", "D")))? {
                 'y' => {
                     chosen.insert(path.clone(), None);
                 }
@@ -143,7 +203,7 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                 let new = repo.store.get_kind(&f.id, Kind::Blob)?;
                 let (Some(old_t), Some(new_t)) = (text(&old), text(&new)) else {
                     // Binary files, links: all or nothing.
-                    match whole(&format!("{} {path} (not text): commit the change?", paint("33", "M")), input) {
+                    match whole(format!("{} {path} (not text): commit the change?", paint("33", "M")))? {
                         'y' => {
                             chosen.insert(path.clone(), Some((f.mode, f.id)));
                         }
@@ -155,7 +215,7 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                 let hs = hunks(old_t, new_t);
                 if hs.is_empty() {
                     // Only the mode changed (e.g. made executable).
-                    match whole(&format!("{} {path}: commit the change of mode?", paint("33", "M")), input) {
+                    match whole(format!("{} {path}: commit the change of mode?", paint("33", "M")))? {
                         'y' => {
                             chosen.insert(path.clone(), Some((f.mode, f.id)));
                         }
@@ -171,8 +231,7 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                         take[i] = all;
                         continue;
                     }
-                    show_hunk(path, h, i + 1, hs.len());
-                    match ask(input, "Commit this change? [y]es [n]o [a]ll the rest of this file [d]one with this file [q]uit:") {
+                    match answer(&Question::Hunk { path, hunk: h, n: i + 1, of: hs.len() })? {
                         'y' => take[i] = true,
                         'a' => {
                             take[i] = true;

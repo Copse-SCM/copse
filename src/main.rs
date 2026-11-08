@@ -211,6 +211,9 @@ enum Command {
         /// Pick which changes to commit, one at a time (like git add -p)
         #[arg(short = 'p', long = "patch")]
         patch: bool,
+        /// Picked beforehand, for the TUI: *:PATH (whole file) or 0110:PATH (per hunk)
+        #[arg(long = "pick", hide = true)]
+        pick: Vec<String>,
         /// Sign the commit (with user.signingKey; gpg.format ssh or openpgp)
         #[arg(short = 'S', long = "gpg-sign", conflicts_with = "no_sign")]
         sign: bool,
@@ -805,9 +808,9 @@ fn main() {
         Command::Stash { action: Some(StashAction::Apply { n }), .. } => stash::apply(*n, true),
         Command::Stash { action: Some(StashAction::Drop { n }), .. } => stash::drop(*n),
         Command::Status { porcelain } => cmd::status(*porcelain),
-        Command::Commit { message, amend, paths, no_verify, patch, sign, no_sign } => {
+        Command::Commit { message, amend, paths, no_verify, patch, pick, sign, no_sign } => {
             let sign = if *sign { Some(true) } else if *no_sign { Some(false) } else { None };
-            cmd::commit(message.as_deref(), paths, *amend, *no_verify, sign, *patch)
+            cmd::commit(message.as_deref(), paths, *amend, *no_verify, sign, *patch, pick)
         }
         Command::VerifyCommit { revs } => signing::verify_commits(revs),
         Command::VerifyTag { names } => signing::verify_tags(names),

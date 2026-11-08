@@ -18,6 +18,7 @@ ok() { echo "  ok: $1"; pass=$((pass + 1)); }
 fail() { echo "  FAIL: $1"; exit 1; }
 same() { [[ "$1" == "$2" ]] || fail "$3 (got '$1', want '$2')"; ok "$3"; }
 ui() { cps ui --replay "$1" --size "${2:-110x24}"; }
+msg() { cps show --stat | awk '/^Date:/{f=1;getline;next} f&&/^    /{print substr($0,5);next} f{exit}'; }
 titles() { cps log -n 100 --oneline "$@" | sed -E 's/^[0-9a-f]{10} (\([^)]*\) )?//' | tr '\n' ',' | sed 's/,$//'; }
 
 mkdir r && cd r && cps init >/dev/null
@@ -41,7 +42,7 @@ ui "tab,tab" | has "Branches" && ui "backtab" | has "Undo timeline" && ok "tab a
 ui "?" | has "Every action runs the same copse command" && ok "? shows the help" || fail "line $LINENO: a step before this check failed"
 
 echo "== Changes: commit, discard, stash"
-out=$(ui "space,c,text:Add notes"); echo "$out" | has "Commit 1 picked file(s): message" && echo "$out" | has "Add notes▏" && ok "space picks a file; c asks for a message" || fail "$out"
+out=$(ui "space,c,text:Add notes"); echo "$out" | has "Commit 1 picked file(s)" && echo "$out" | has "Summary  Add notes▏" && echo "$out" | has "tab to write it" && ok "space picks a file; c asks for a summary (and offers a description)" || fail "$out"
 ui "space,c,text:Add notes,esc" >/dev/null && same "$(titles -n 1)" "Docs" "esc cancels without committing"
 out=$(ui "space,c,text:Add notes,enter"); echo "$out" | has "[main " && echo "$out" | has "1 other change(s) left uncommitted" && ok "enter commits just the picked file, and shows copse's output" || fail "$out"
 same "$(titles -n 1) | $(cps status | grep -E '^  [AMD] ' | sed 's/^ *//')" "Add notes | M src/main.rs" "the command line agrees: committed, and the other change is still there"
@@ -54,9 +55,36 @@ echo wip > wip.txt && ui "s,y" >/dev/null && [[ ! -e wip.txt ]] && cps stash sho
 cps stash pop >/dev/null && rm -f wip.txt
 echo a > a.txt && echo b > b.txt && ui "a,c,text:Both,enter" >/dev/null && same "$(cps show --stat | grep -c '|')" "2" "a picks everything" || fail "line $LINENO: a step before this check failed"
 
+echo "== Changes: a description under the summary"
+echo c > c.txt
+out=$(ui "c,text:Add c,tab,text:Why it's needed,enter,text:and more"); echo "$out" | has "Why it's needed" && echo "$out" | has "and more▏" && echo "$out" | has "ctrl-s commit" && ok "tab moves to the description, where enter starts a new line" || fail "$out"
+ui "c,text:Add c,tab,text:Why it's needed,enter,text:and more,ctrl-s" >/dev/null
+same "$(msg)" "$(printf "Add c\n\nWhy it's needed\nand more")" "ctrl-s commits, with the summary, a blank line, then the description"
+echo d > d.txt && ui "c,text:Add d,tab,text:body,tab,enter" >/dev/null && same "$(msg)" "$(printf "Add d\n\nbody")" "tab goes back to the summary, where enter commits"
+echo e > e.txt && ui "c,text:Add e,tab,alt-enter" >/dev/null && same "$(msg)" "Add e" "an empty description adds nothing (alt-enter commits too)"
+
+echo "== Changes: picking some of a file's changes"
+seq 1 30 | sed 's/^/line /' > long.txt && cps commit -m "long" >/dev/null
+seq 1 30 | sed 's/^/line /' | sed -e 's/^line 3$/LINE THREE/' -e 's/^line 25$/LINE 25/' > long.txt
+on_disk=$(sha256 long.txt)
+out=$(ui "enter"); echo "$out" | has "long.txt: 0 of 2 change(s) picked" && echo "$out" | has "▶ [ ] @@ -1,6 +1,6 @@" && ok "enter on a modified file lists its changes, to pick from" || fail "$out"
+out=$(ui "enter,space"); echo "$out" | has "[x] @@ -1,6" && echo "$out" | has "▶ [ ] @@ -22" && ok "space picks a change and moves to the next" || fail "$out"
+ui "enter,space,enter" | has "[~] M long.txt" && ok "a file with some changes picked is marked [~]" || fail "line $LINENO: a step before this check failed"
+ui "enter,space,space,enter" | has "[x] M long.txt" && ok "picking every change picks the whole file" || fail "line $LINENO: a step before this check failed"
+ui "enter,a,a,enter" | has "[ ] M long.txt" && ok "a picks all, and again none" || fail "line $LINENO: a step before this check failed"
+out=$(ui "enter,space,enter,c,text:Third line,enter"); echo "$out" | has "(picked changes)" && ok "c commits only the picked changes" || fail "$out"
+cps show | has "+LINE THREE" && ! cps show | grep "LINE 25" >/dev/null && ok "the commit has the first change and not the second" || fail "line $LINENO: a step before this check failed"
+same "$(sha256 long.txt) $(cps status --porcelain | grep long)" "$on_disk M long.txt" "the file on disk is untouched, and the rest is still a change"
+cps diff -- long.txt | has "+LINE 25" && ! cps diff -- long.txt | grep "LINE THREE" >/dev/null && ok "and its diff is just the change left" || fail "line $LINENO: a step before this check failed"
+echo new > newfile.txt && ui "j,enter" | has "newfile.txt can only be committed whole" && ok "new files can only be picked whole" || fail "line $LINENO: a step before this check failed"
+rm newfile.txt
+seq 1 30 | sed 's/^/line /' | sed -e 's/^line 3$/LINE THREE/' -e 's/^line 25$/LINE 25/' -e 's/^line 14$/LINE 14/' > long.txt
+{ cps commit -m "stale" --pick=1:long.txt 2>&1 || true; } | has "now has 2 change(s), not the 1" && same "$(titles -n 1)" "Third line" "a pick made before the file changed again is refused, not guessed at" || fail "line $LINENO: a step before this check failed"
+cps commit -m "rest of long" >/dev/null
+
 echo "== History: revert, branch here, check out"
 ui "2,v" | has 'Revert' && ok "v asks before reverting" || fail "line $LINENO: a step before this check failed"
-ui "2,v,y" >/dev/null && same "$(titles -n 1)" "Revert \"Both\"" "y reverts the selected commit"
+ui "2,v,y" >/dev/null && same "$(titles -n 1)" "Revert \"rest of long\"" "y reverts the selected commit"
 ui "2,G,b,text:from-start,enter" >/dev/null && same "$(cps log --oneline -n 1 from-start | sed -E 's/^[0-9a-f]{10} (\([^)]*\) )?//')" "Start" "b makes a branch at the selected commit"
 ui "2,G,o,y" >/dev/null && cps status | head -1 | has "HEAD detached" && ok "o checks the selected commit out (detached)" || fail "line $LINENO: a step before this check failed"
 cps checkout main >/dev/null
@@ -88,6 +116,9 @@ ui "P" | has "Pushed main to origin" && ui "" | has "in step with origin" && ok 
 cd .. && cps clone hub other >/dev/null && cd other && echo theirs > theirs.txt && cps commit -m theirs >/dev/null && cps push >/dev/null && cd ../r
 ui "F" >/dev/null && ui "" | has "↓1 to pull" && ok "F fetches, and the top line shows what there is to pull" || fail "line $LINENO: a step before this check failed"
 ui "L" | has "Fast-forward" && [[ -f theirs.txt ]] && ok "L pulls" || fail "line $LINENO: a step before this check failed"
+ui "F,busy" | has "⟳ copse fetch… (keep going" && ok "fetch, pull and push run in the background, so the screen keeps working" || fail "line $LINENO: a step before this check failed"
+ui "F,j,2,busy" | has "2 History" && ok "you can move around while one runs" || fail "line $LINENO: a step before this check failed"
+ui "F,P,busy" | has "Wait: copse fetch is still running." && ok "and another can't start until it's done" || fail "line $LINENO: a step before this check failed"
 ui "3" | has "origin/main" && ok "remote branches are listed" || fail "line $LINENO: a step before this check failed"
 
 echo "== robustness"

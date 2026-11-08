@@ -216,8 +216,14 @@ pub fn status(porcelain: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: bool, sign: Option<bool>, patch: bool) -> Result<()> {
+pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: bool, sign: Option<bool>, patch: bool, picks: &[String]) -> Result<()> {
     let repo = Repo::find()?;
+    // --pick (the TUI's picked files and hunks): -p with the answers given up front.
+    let choices: BTreeMap<String, crate::hunks::Choice> = picks.iter().map(|s| crate::hunks::parse_choice(s)).collect::<Result<_>>()?;
+    let patch = patch || !choices.is_empty();
+    if !choices.is_empty() && (message.is_none() || !paths.is_empty()) {
+        bail!("--pick needs -m, and no paths (the picks say which files)");
+    }
     if patch && amend {
         bail!("-p and --amend don't go together; commit the picked changes, then amend if you need to");
     }
@@ -272,7 +278,12 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
     // With paths, only changes under them are committed; everything else keeps the
     // last commit's version (and stays an uncommitted change).
     let specs = paths.iter().map(|p| crate::restore::repo_path(&repo, p)).collect::<Result<Vec<_>>>()?;
-    let in_scope = |p: &str| specs.is_empty() || specs.iter().any(|s| s.is_empty() || p == s || p.starts_with(&format!("{s}/")));
+    let in_scope = |p: &str| {
+        if !choices.is_empty() {
+            return choices.contains_key(p);
+        }
+        specs.is_empty() || specs.iter().any(|s| s.is_empty() || p == s || p.starts_with(&format!("{s}/")))
+    };
     for (typed, spec) in paths.iter().zip(&specs) {
         let under = |p: &str| spec.is_empty() || p == spec || p.starts_with(&format!("{spec}/"));
         if !files.iter().any(|f| under(&f.path)) && !index.entries.keys().any(|p| under(p)) {
@@ -291,7 +302,11 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
     let picked = if patch {
         let stdin = std::io::stdin();
         let mut input = stdin.lock();
-        let picked = crate::hunks::pick(&repo, &index, &files, &ch, &in_scope, &mut input)?;
+        let picked = if choices.is_empty() {
+            crate::hunks::pick(&repo, &index, &files, &ch, &in_scope, &mut crate::hunks::ask_terminal(&mut input))?
+        } else {
+            crate::hunks::pick(&repo, &index, &files, &ch, &in_scope, &mut crate::hunks::answers(&choices))?
+        };
         if picked.is_empty() {
             println!("Nothing picked, so nothing was committed.");
             return Ok(());

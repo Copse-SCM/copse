@@ -53,6 +53,7 @@ pub fn run_copse(exe: &Path, root: &Path, args: &[&str]) -> (bool, String) {
         .current_dir(root)
         .env("COPSE_EDITOR", "true") // nothing may open an editor under the TUI
         .env("NO_COLOR", "1")
+        .env("GIT_TERMINAL_PROMPT", "0") // no password prompt can reach the TUI's screen
         .stdin(Stdio::null())
         .output();
     match out {
@@ -69,6 +70,21 @@ pub fn run_copse(exe: &Path, root: &Path, args: &[&str]) -> (bool, String) {
         }
         Err(e) => (false, format!("couldn't run copse: {e}")),
     }
+}
+
+/// The hunks of a modified text file, exactly as `copse commit --pick` will count
+/// them. None for files that can only be committed whole (new, deleted, not text,
+/// or only the mode changed).
+pub fn load_hunks(repo: &Repo, path: &str) -> Result<Option<Vec<crate::hunks::Hunk>>> {
+    let index = Index::load(&repo.wt)?;
+    let Some(e) = index.entries.get(path) else { return Ok(None) };
+    let files = snapshot(&repo.root, &index, Some(&repo.store))?;
+    let Some(f) = files.iter().find(|f| f.path == path) else { return Ok(None) };
+    let old = repo.store.get_kind(&Id::from_bytes(e.id), crate::objects::Kind::Blob)?;
+    let new = repo.store.get_kind(&f.id, crate::objects::Kind::Blob)?;
+    let (Some(o), Some(n)) = (crate::hunks::text(&old), crate::hunks::text(&new)) else { return Ok(None) };
+    let hs = crate::hunks::hunks(o, n);
+    Ok((!hs.is_empty()).then_some(hs))
 }
 
 pub fn load_changes(repo: &Repo) -> Result<Vec<Change>> {
