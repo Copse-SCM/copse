@@ -72,3 +72,37 @@ jobs:
           gh release create nightly dist/* --repo "$GITHUB_REPOSITORY" --prerelease --target "$SHA" \
             --title "copse nightly $VERSION" \
             --notes "A development build of copse from commit $SHA, made $(date -u '+%Y-%m-%d %H:%M UTC'). It has everything on main so far and may have rough edges; for everyday use, take the latest release."
+
+  # Point the tap's copse-nightly formula at the new build (same token as releases:
+  # the HOMEBREW_TAP_TOKEN secret, with write access to Copse-SCM/homebrew-copse).
+  homebrew:
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: No token, no update
+        if: env.TAP_TOKEN == ''
+        run: echo "::notice::HOMEBREW_TAP_TOKEN isn't set, so the tap's copse-nightly formula wasn't updated."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.TAP_TOKEN != ''
+        with:
+          persist-credentials: false
+
+      - name: Update the formula
+        if: env.TAP_TOKEN != ''
+        run: |
+          gh release download nightly --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/Copse-SCM/homebrew-copse.git" tap
+          mkdir -p tap/Formula
+          python3 packaging/homebrew/render.py --nightly "$VERSION" nightly SHA256SUMS > tap/Formula/copse-nightly.rb
+          cd tap
+          git config user.name "Belligerently"
+          git config user.email "zachary@aflalo.com"
+          git add Formula/copse-nightly.rb
+          git diff --cached --quiet && { echo "The formula is already up to date."; exit 0; }
+          git commit -m "copse-nightly $VERSION"
+          git push origin HEAD
