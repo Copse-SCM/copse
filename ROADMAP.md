@@ -93,8 +93,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | Aliases | ✅ | Command aliases and `!` shell aliases |
 | Hooks | ✅ | `pre-commit`, `commit-msg`, `post-commit`, `pre-push`, `pre-rebase`, `post-merge`, `post-checkout`; `core.hooksPath`; `--no-verify` |
 | Signed commits and tags | ✅ | SSH and GPG, in git's format, following git's signing settings; every commit copse makes; `tag -s`, `verify-commit`, `verify-tag`. Verified on github.com |
-| macOS | ✅ | Where everything is built and tested |
-| Linux | 🟡 | Should work (nothing macOS-only in the core), but never built or tested; the test scripts use macOS tools (`sed -i ''`, `stat -f`). Next: CI on GitHub Actions for macOS and Linux |
+| macOS, Linux | ✅ | CI (GitHub Actions) builds and runs every suite plus a stress test on both, for each push; first green run 2026-11-08 |
 | Windows | ❌ | |
 
 ## 3. Plan: full feature parity first, then a TUI
