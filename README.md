@@ -27,7 +27,7 @@ copse clone https://github.com/you/project.git   # or git@github.com:you/project
 cd project
 copse status                  # what changed, and where you stand against origin
 copse commit -m "Fix login"   # no staging step: commits everything that changed
-copse commit -p               # or pick changes one at a time
+copse commit -p               # or pick changes one at a time (s splits, e edits)
 copse push
 copse undo                    # changed your mind? undo the last move (again to redo)
 copse                         # the interactive screen
@@ -53,4 +53,4 @@ copse                         # the interactive screen
 
 ## Status
 
-Version 0.1, for people who like trying new tools. 917 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.
+Version 0.1, for people who like trying new tools. 983 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.

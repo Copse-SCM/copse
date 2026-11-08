@@ -73,6 +73,55 @@ cps checkout main >/dev/null 2>&1; cps reset --hard HEAD~1 >/dev/null 2>&1; echo
 cps merge flatten >/dev/null; [[ -f more.txt && ! -e lib/more.txt ]] && ok "a folder moved to the top level: its new file follows it there" || fail "line $LINENO: more.txt didn't follow lib/ to the top"
 cps merge --abort >/dev/null 2>&1 || true; cd ..
 
+echo "== merge strategies: -s ours, -X ours / theirs (checked against git)"
+# The same history in git and copse: both sides edit line 3 (a conflict), each edits
+# another line of its own (merges cleanly), both change a binary file, and theirs
+# deletes a file ours edited (stays a conflict, as in git).
+build() {  # $1 = git or copse
+  mkdir "$1" && cd "$1"
+  local c=cps; [[ $1 == git ]] && { git init -q -b main; c=git; } || cps init >/dev/null
+  seq 1 10 > f.txt; printf 'bin\0base' > b.bin; echo keep > d.txt
+  if [[ $c == git ]]; then git add -A && git commit -qm base && git branch side; else cps commit -m base >/dev/null && cps branch side >/dev/null; fi
+  sedi -e 's/^3$/three-ours/' -e 's/^8$/eight-ours/' f.txt; printf 'bin\0ours' > b.bin; echo edited > d.txt
+  if [[ $c == git ]]; then git commit -qam ours && git checkout -q side; else cps commit -m ours >/dev/null && cps checkout side >/dev/null; fi
+  sedi -e 's/^3$/three-theirs/' -e 's/^10$/ten-theirs/' f.txt; printf 'bin\0theirs' > b.bin; rm d.txt
+  if [[ $c == git ]]; then git commit -qam theirs && git checkout -q main; else cps commit -m theirs >/dev/null && cps checkout main >/dev/null; fi
+  cd ..
+}
+mkdir strat && cd strat && build git && build copse
+for x in ours theirs; do
+  cp -R git "git-$x" && cp -R copse "copse-$x"
+  (cd "git-$x" && git merge -q -X "$x" side -m m >/dev/null 2>&1 || true)
+  out=$(cd "copse-$x" && cps merge -X "$x" side -m m 2>&1 || true)
+  same "$(cd "copse-$x" && files f.txt) $(hashin < "copse-$x/b.bin")" "$(cd "git-$x" && files f.txt) $(hashin < "git-$x/b.bin")" "-X $x: the clashing line and the binary file go the $x side's way, other edits from both sides are kept (same as git)"
+  [[ "$out" == *"d.txt"* && "$out" == *"deleted on one side"* && -f "copse-$x/d.txt" ]] && ok "-X $x: a file deleted on one side and edited on the other is still a conflict, as in git" || fail "$out"
+done
+cp -R git git-s && cp -R copse copse-s
+(cd git-s && git merge -q -s ours side -m "keep ours")
+(cd copse-s && cps merge -s ours side -m "keep ours" >/dev/null)
+same "$(cd copse-s && files f.txt d.txt) $(cd copse-s && parents)" "$(cd git-s && files f.txt d.txt) 1" "-s ours records the merge but keeps the current files exactly (same as git)"
+(cd copse-s && clean) && ok "and leaves nothing to commit" || fail "line $LINENO: a step before this check failed"
+mkdir ffs && cd ffs && cps init >/dev/null && echo a > a && cps commit -m a >/dev/null && cps branch s >/dev/null && cps checkout s >/dev/null && echo b > b && cps commit -m b >/dev/null && cps checkout main >/dev/null
+cps merge -s ours s >/dev/null && [[ ! -e b ]] && same "$(parents)" "1" "-s ours makes a merge commit even where a fast-forward would do, as git does"
+cd ..
+(cd copse && expect_fail "-s theirs is refused with a pointer to -X theirs" "-X theirs" cps merge -s theirs side)
+(cd copse && expect_fail "unknown -X options are refused" "isn't supported" cps merge -X patience side)
+cp -R git git-cp && cp -R copse copse-cp
+(cd git-cp && git cherry-pick -X theirs side >/dev/null 2>&1 || true)
+(cd copse-cp && cps cherry-pick -X theirs side >/dev/null 2>&1 || true)
+same "$(cd copse-cp && files f.txt)" "$(cd git-cp && files f.txt)" "cherry-pick -X theirs (same as git)"
+cp -R git git-rb && cp -R copse copse-rb
+(cd git-rb && git checkout -q side && git rebase -q -X ours main >/dev/null 2>&1 || true)
+(cd copse-rb && cps checkout side >/dev/null && cps rebase -X ours main >/dev/null 2>&1 || true)
+same "$(cd copse-rb && files f.txt)" "$(cd git-rb && files f.txt)" "rebase -X ours (ours is the branch being rebased onto, as in git)"
+mkdir rbc && cd rbc && cps init >/dev/null && seq 1 5 > f.txt && echo keep > d.txt && cps commit -m base >/dev/null && cps branch topic >/dev/null
+sedi 's/^3$/main-3/' f.txt && echo edited > d.txt && cps commit -m "main edits" >/dev/null
+cps checkout topic >/dev/null && rm d.txt && cps commit -m "drop d" >/dev/null && sedi 's/^3$/topic-3/' f.txt && cps commit -m "topic edits 3" >/dev/null
+out=$(cps rebase -X theirs main 2>&1 || true); [[ "$out" == *"d.txt"* ]] || fail "the rebase should stop on d.txt: $out"
+rm d.txt && cps rebase --continue >/dev/null 2>&1 && same "$(sed -n 3p f.txt) $(titles -n 1)" "topic-3 topic edits 3" "rebase --continue keeps -X theirs for the steps after a pause"
+cd ..
+cd ..
+
 echo "== fast-forward pulls touch only what changed"
 mkdir ff && cd ff && cps init >/dev/null && mkdir -p src docs && echo a > src/a.txt && echo b > src/b.txt && echo d > docs/d.txt && echo k > keep.txt && cps commit -m base >/dev/null
 cd .. && cps clone ff ff2 >/dev/null && cd ff

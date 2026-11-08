@@ -1,4 +1,6 @@
 mod branches;
+mod plumbing;
+mod pretty;
 mod cmd;
 mod config;
 mod diffs;
@@ -103,6 +105,12 @@ enum Command {
         /// Rebase your commits on top of the remote's instead of merging
         #[arg(short, long)]
         rebase: bool,
+        /// Merge strategy: ours records the merge but keeps your files exactly as they are
+        #[arg(short = 's', long = "strategy", value_name = "STRATEGY")]
+        strategy: Option<String>,
+        /// Settle conflicting edits for one side (-X ours, -X theirs), or turn off rename detection (-X no-renames)
+        #[arg(short = 'X', long = "strategy-option", value_name = "OPTION")]
+        strategy_option: Vec<String>,
     },
     /// Upload a branch (default: the current one) to a remote
     Push {
@@ -310,9 +318,85 @@ enum Command {
         /// Only commits whose message contains this text
         #[arg(long)]
         grep: Option<String>,
+        /// git's formats: oneline, short, medium, full, fuller, reference, raw, or format:/tformat: with %-placeholders
+        #[arg(long, num_args = 0..=1, default_missing_value = "medium", value_name = "FORMAT")]
+        pretty: Option<String>,
+        /// Like --pretty; a bare template such as "%h %s" works too
+        #[arg(long, value_name = "FORMAT", conflicts_with = "pretty")]
+        format: Option<String>,
+        /// How dates are written: default, iso, iso-strict, rfc, short, raw, unix, relative
+        #[arg(long, value_name = "STYLE")]
+        date: Option<String>,
         /// Only commits that changed these files or folders (after --)
         #[arg(last = true)]
         paths: Vec<String>,
+    },
+    /// Plumbing: an object's type (-t), size (-s) or contents (-p); -e checks it exists
+    CatFile {
+        /// -t, -s, -p, -e, or a type (blob, tree, commit, tag)
+        #[arg(allow_hyphen_values = true)]
+        mode: String,
+        /// An id, REV, REV:path, REV^{tree}...
+        object: String,
+    },
+    /// Plumbing: turn revision names into ids, or answer questions about the repository
+    RevParse {
+        revs: Vec<String>,
+        /// Short ids
+        #[arg(long)]
+        short: bool,
+        /// Names instead of ids (HEAD becomes the current branch)
+        #[arg(long = "abbrev-ref")]
+        abbrev_ref: bool,
+        /// Exactly one revision, which must exist
+        #[arg(long)]
+        verify: bool,
+        /// With --verify: no error message, just the exit status
+        #[arg(short, long)]
+        quiet: bool,
+        /// The working folder's top
+        #[arg(long = "show-toplevel")]
+        show_toplevel: bool,
+        /// Where the repository's data is (.copse)
+        #[arg(long = "git-dir", alias = "copse-dir")]
+        git_dir: bool,
+        /// true inside a working folder
+        #[arg(long = "is-inside-work-tree")]
+        inside_work_tree: bool,
+        /// true in a bare repository
+        #[arg(long = "is-bare-repository")]
+        is_bare: bool,
+    },
+    /// Plumbing: list a folder of a commit (MODE TYPE ID<tab>NAME)
+    LsTree {
+        rev: String,
+        path: Option<String>,
+        /// Go into folders
+        #[arg(short)]
+        r: bool,
+        /// Only folders
+        #[arg(short)]
+        d: bool,
+        /// Only names
+        #[arg(long = "name-only", alias = "name-status")]
+        name_only: bool,
+    },
+    /// Plumbing: the files copse tracks (or only modified -m, deleted -d, untracked -o)
+    LsFiles {
+        #[arg(short, long)]
+        modified: bool,
+        #[arg(short, long)]
+        deleted: bool,
+        #[arg(short, long)]
+        others: bool,
+    },
+    /// Plumbing: the id a file would be stored under (-w stores it)
+    HashObject {
+        files: Vec<String>,
+        #[arg(short)]
+        w: bool,
+        #[arg(long)]
+        stdin: bool,
     },
     /// List branches, or create a new one at the current commit
     Branch {
@@ -363,6 +447,9 @@ enum Command {
         /// Give up and put the branch back as it was
         #[arg(long)]
         abort: bool,
+        /// Settle conflicting edits for one side (-X ours, -X theirs), or turn off rename detection (-X no-renames)
+        #[arg(short = 'X', long = "strategy-option", value_name = "OPTION")]
+        strategy_option: Vec<String>,
     },
     /// Put uncommitted changes aside (`copse stash`), or list / show / pop / apply / drop them
     #[command(args_conflicts_with_subcommands = true)]
@@ -445,6 +532,9 @@ enum Command {
         /// Give up and put the branch back as it was
         #[arg(long)]
         abort: bool,
+        /// Settle conflicting edits for one side (-X ours, -X theirs), or turn off rename detection (-X no-renames)
+        #[arg(short = 'X', long = "strategy-option", value_name = "OPTION")]
+        strategy_option: Vec<String>,
     },
     /// Add commits that undo earlier commits
     Revert {
@@ -462,6 +552,9 @@ enum Command {
         /// Give up and put the branch back as it was
         #[arg(long)]
         abort: bool,
+        /// Settle conflicting edits for one side (-X ours, -X theirs), or turn off rename detection (-X no-renames)
+        #[arg(short = 'X', long = "strategy-option", value_name = "OPTION")]
+        strategy_option: Vec<String>,
     },
     /// Merge a branch or commit into the current branch
     Merge {
@@ -478,6 +571,12 @@ enum Command {
         /// Message for the merge commit
         #[arg(short, long)]
         message: Option<String>,
+        /// Merge strategy: ours records the merge but keeps your files exactly as they are
+        #[arg(short = 's', long = "strategy", value_name = "STRATEGY")]
+        strategy: Option<String>,
+        /// Settle conflicting edits for one side (-X ours, -X theirs), or turn off rename detection (-X no-renames)
+        #[arg(short = 'X', long = "strategy-option", value_name = "OPTION")]
+        strategy_option: Vec<String>,
     },
     /// Switch to a branch or commit (a branch name, id prefix, HEAD~2, ...)
     #[command(alias = "co")]
@@ -695,6 +794,12 @@ fn expand_aliases(mut args: Vec<String>) -> Vec<String> {
     std::process::exit(1);
 }
 
+/// Set the -X options, then run the command (errors in either are reported alike).
+fn with_x(xs: &[String], run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    merge::set_options(merge::parse_options(xs)?);
+    run()
+}
+
 fn main() {
     quiet_on_closed_stdout();
     let args = expand_aliases(std::env::args().collect());
@@ -733,8 +838,11 @@ fn main() {
                 _ => remote::Depth::Full,
             },
         ),
-        Command::Pull { remote, branch, rebase } => remote::pull(remote, branch.as_deref(), *rebase),
-        Command::Rebase { upstream, onto, interactive, autosquash, exec, no_verify, cont, skip, abort } => rebase::rebase(rebase::RebaseArgs {
+        Command::Pull { remote, branch, rebase, strategy, strategy_option } => with_x(strategy_option, || {
+            remote::pull(remote, branch.as_deref(), *rebase, merge::parse_strategy(strategy.as_deref())?)
+        }),
+        Command::Rebase { upstream, onto, interactive, autosquash, exec, no_verify, cont, skip, abort, strategy_option } => with_x(strategy_option, || {
+            rebase::rebase(rebase::RebaseArgs {
             no_verify: *no_verify,
             upstream: upstream.as_deref(),
             onto: onto.as_deref(),
@@ -744,6 +852,7 @@ fn main() {
             cont: *cont,
             skip: *skip,
             abort: *abort,
+        })
         }),
         Command::Push { remote, branch, force, tags, delete, no_verify } => {
             remote::push(remote, branch.as_deref(), *force, *tags, *delete, *no_verify)
@@ -795,10 +904,12 @@ fn main() {
             Some(BisectAction::Reset) => investigate::BisectCmd::Reset,
             Some(BisectAction::Run { command }) => investigate::BisectCmd::Run(command),
         }),
-        Command::CherryPick { revs, mainline, cont, skip, abort } => {
+        Command::CherryPick { revs, mainline, cont, skip, abort, strategy_option } => with_x(strategy_option, || {
             rebase::replay(revs, rebase::Op::CherryPick, *mainline, *cont, *skip, *abort)
-        }
-        Command::Revert { revs, mainline, cont, skip, abort } => rebase::replay(revs, rebase::Op::Revert, *mainline, *cont, *skip, *abort),
+        }),
+        Command::Revert { revs, mainline, cont, skip, abort, strategy_option } => with_x(strategy_option, || {
+            rebase::replay(revs, rebase::Op::Revert, *mainline, *cont, *skip, *abort)
+        }),
         Command::Restore { paths, from } => restore::restore(paths, from.as_deref()),
         Command::Reset { rev, hard, soft: _ } => restore::reset(rev.as_deref(), *hard),
         Command::Stash { action: None, message, paths } => stash::push(message.as_deref(), paths),
@@ -831,7 +942,8 @@ fn main() {
             unset: *unset,
             list: *list,
         }),
-        Command::Merge { target, abort, no_ff, ff_only, message } => {
+        Command::Merge { target, abort, no_ff, ff_only, message, strategy, strategy_option } => with_x(strategy_option, || {
+            let strategy = merge::parse_strategy(strategy.as_deref())?;
             let ff = if *no_ff {
                 merge::FastForward::Never
             } else if *ff_only {
@@ -839,11 +951,13 @@ fn main() {
             } else {
                 merge::FastForward::Allow
             };
-            merge::merge(target.as_deref(), *abort, ff, message.as_deref())
-        }
+            merge::merge_with(target.as_deref(), *abort, ff, message.as_deref(), strategy)
+        }),
         Command::Diff { revs, stat, paths } => diffs::diff(revs, paths, *stat),
         Command::Show { rev, stat } => diffs::show(rev.as_deref(), *stat),
-        Command::Log { revs, limit, oneline, graph, patch, stat, first_parent, all, author, grep, paths } => logs::log(logs::LogArgs {
+        Command::Log { revs, limit, oneline, graph, patch, stat, first_parent, all, author, grep, paths, pretty, format, date } => (|| {
+            let format = pretty.as_deref().or(format.as_deref()).map(pretty::Format::parse).transpose()?;
+            logs::log(logs::LogArgs {
             revs,
             limit: *limit,
             oneline: *oneline,
@@ -855,7 +969,25 @@ fn main() {
             author: author.as_deref(),
             grep: grep.as_deref(),
             paths,
+            format,
+            date: pretty::parse_date_mode(date.as_deref())?,
+        })
+        })(),
+        Command::CatFile { mode, object } => plumbing::cat_file(mode, object),
+        Command::RevParse { revs, short, abbrev_ref, verify, quiet, show_toplevel, git_dir, inside_work_tree, is_bare } => plumbing::rev_parse(plumbing::RevParse {
+            revs,
+            short: *short,
+            abbrev_ref: *abbrev_ref,
+            verify: *verify,
+            quiet: *quiet,
+            show_toplevel: *show_toplevel,
+            git_dir: *git_dir,
+            inside_work_tree: *inside_work_tree,
+            is_bare: *is_bare,
         }),
+        Command::LsTree { rev, path, r, d, name_only } => plumbing::ls_tree(rev, path.as_deref(), *r, *d, *name_only),
+        Command::LsFiles { modified, deleted, others } => plumbing::ls_files(*modified, *deleted, *others),
+        Command::HashObject { files, w, stdin } => plumbing::hash_object(files, *w, *stdin),
         Command::Branch { name, second, delete, force_delete, rename, force_rename, force } => {
             branches::branch(branches::BranchArgs {
                 name: name.as_deref(),

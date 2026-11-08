@@ -19,6 +19,91 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
+// ---------------------------------------------------------------- options (-X)
+
+/// Which side wins where both changed the same lines (`-X ours` / `-X theirs`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Favor {
+    #[default]
+    None,
+    Ours,
+    Theirs,
+}
+
+/// The `-X` options in force for this command. Merges happen deep inside merge,
+/// pull, rebase, cherry-pick, revert and stash, so they're set once per process
+/// (and saved with a paused rebase, so `--continue` keeps them).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Options {
+    pub favor: Favor,
+    pub no_renames: bool,
+}
+
+static OPTIONS: std::sync::Mutex<Options> = std::sync::Mutex::new(Options { favor: Favor::None, no_renames: false });
+
+pub fn set_options(o: Options) {
+    *OPTIONS.lock().unwrap() = o;
+}
+
+pub fn options() -> Options {
+    *OPTIONS.lock().unwrap()
+}
+
+/// Parse `-X` values as git spells them: ours, theirs, no-renames, find-renames.
+pub fn parse_options(xs: &[String]) -> Result<Options> {
+    let mut o = Options::default();
+    for x in xs {
+        match x.as_str() {
+            "ours" => o.favor = Favor::Ours,
+            "theirs" => o.favor = Favor::Theirs,
+            "no-renames" => o.no_renames = true,
+            x if x == "find-renames" || x.starts_with("find-renames=") || x.starts_with("rename-threshold=") => o.no_renames = false,
+            other => bail!("-X {other} isn't supported; copse knows -X ours, -X theirs, -X no-renames and -X find-renames"),
+        }
+    }
+    Ok(o)
+}
+
+impl Options {
+    /// How a paused rebase remembers them: "ours", "theirs no-renames", ...
+    pub fn to_words(self) -> String {
+        let mut w = Vec::new();
+        match self.favor {
+            Favor::Ours => w.push("ours"),
+            Favor::Theirs => w.push("theirs"),
+            Favor::None => {}
+        }
+        if self.no_renames {
+            w.push("no-renames");
+        }
+        w.join(" ")
+    }
+
+    pub fn from_words(words: &str) -> Options {
+        let xs: Vec<String> = words.split_whitespace().map(String::from).collect();
+        parse_options(&xs).unwrap_or_default()
+    }
+}
+
+/// `-s`: the merge strategy. Only the default and `ours` exist in copse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Strategy {
+    /// The normal three-way merge (git's ort / recursive).
+    #[default]
+    Normal,
+    /// Record a merge, but keep the current branch's files exactly as they are.
+    Ours,
+}
+
+pub fn parse_strategy(s: Option<&str>) -> Result<Strategy> {
+    Ok(match s {
+        None | Some("ort") | Some("recursive") => Strategy::Normal,
+        Some("ours") => Strategy::Ours,
+        Some("theirs") => bail!("there's no -s theirs (git has none either); -X theirs takes their side wherever both changed the same lines"),
+        Some(other) => bail!("-s {other} isn't supported; copse has the normal merge (ort, recursive) and -s ours"),
+    })
+}
+
 // ---------------------------------------------------------------- merge state
 
 /// An in-progress merge that stopped on conflicts.
@@ -233,6 +318,11 @@ fn push_conflict_side(out: &mut String, lines: &[&str]) {
 
 /// Merge text line by line. Returns the merged text and the number of conflict blocks.
 pub fn merge_text(base: &str, ours: &str, theirs: &str, ours_label: &str, theirs_label: &str) -> (String, usize) {
+    merge_text_favoring(base, ours, theirs, ours_label, theirs_label, options().favor)
+}
+
+/// `merge_text`, with conflicting edits settled for one side (-X ours / theirs).
+pub fn merge_text_favoring(base: &str, ours: &str, theirs: &str, ours_label: &str, theirs_label: &str, favor: Favor) -> (String, usize) {
     let b: Vec<&str> = base.split_inclusive('\n').collect();
     let o: Vec<&str> = ours.split_inclusive('\n').collect();
     let t: Vec<&str> = theirs.split_inclusive('\n').collect();
@@ -279,6 +369,10 @@ pub fn merge_text(base: &str, ours: &str, theirs: &str, ours_label: &str, theirs
             push_lines(&mut out, ts); // only theirs changed
         } else if j == j0 || os == ts {
             push_lines(&mut out, os); // only ours changed, or both made the same change
+        } else if favor == Favor::Ours {
+            push_lines(&mut out, os); // -X ours
+        } else if favor == Favor::Theirs {
+            push_lines(&mut out, ts); // -X theirs
         } else {
             conflicts += 1;
             out.push_str(&format!("<<<<<<< {ours_label}\n"));
@@ -313,7 +407,9 @@ pub enum FastForward {
     Only,
 }
 
-pub fn merge(target: Option<&str>, abort: bool, ff: FastForward, message: Option<&str>) -> Result<()> {
+pub fn merge_with(target: Option<&str>, abort: bool, ff: FastForward, message: Option<&str>, strategy: Strategy) -> Result<()> {
+    // As in git, -s ours always records a merge, even where a fast-forward would do.
+    let ff = if strategy == Strategy::Ours && ff == FastForward::Allow { FastForward::Never } else { ff };
     let repo = Repo::find()?;
     if abort {
         return abort_merge(&repo);
@@ -364,7 +460,11 @@ pub fn merge(target: Option<&str>, abort: bool, ff: FastForward, message: Option
         None => BTreeMap::new(),
     };
     let ours_label = head_label(&repo)?;
-    let (merged, conflicts) = merge_trees(&repo, &base_tree, &ours_tree, &theirs_tree, &ours_label, target)?;
+    let (merged, conflicts) = match strategy {
+        // -s ours: a merge commit whose files are exactly the current branch's.
+        Strategy::Ours => (ours_tree.clone(), vec![]),
+        Strategy::Normal => merge_trees(&repo, &base_tree, &ours_tree, &theirs_tree, &ours_label, target)?,
+    };
 
     let added: Vec<String> = merged.keys().filter(|p| !ours_tree.contains_key(*p)).cloned().collect();
     let (written, removed) = apply_tree(&repo, &mut index, &files, &merged, &[])?;
@@ -413,7 +513,7 @@ fn follow_renames(repo: &Repo, base: &Files, ours: &Files, theirs: &Files) -> (F
     let (mut base, mut ours, mut theirs) = (base.clone(), ours.clone(), theirs.clone());
     let mut conflicts = Vec::new();
     let mut doubles = Vec::new();
-    if base.is_empty() {
+    if base.is_empty() || options().no_renames {
         return (base, ours, theirs, conflicts, doubles);
     }
     let ours_renames = crate::renames::detect(repo, &base, &ours);
@@ -596,6 +696,17 @@ fn merge_file(
 ) -> Result<((Mode, Id), Option<&'static str>)> {
     // Mode: take theirs if only theirs changed it, otherwise keep ours.
     let mode = if base.map_or(false, |(bm, _)| bm == o_mode) { t_mode } else { o_mode };
+    // -X ours / theirs settle what can't be merged line by line, too.
+    let whole = match options().favor {
+        Favor::Ours => Some((o_mode, o_id)),
+        Favor::Theirs => Some((t_mode, t_id)),
+        Favor::None => None,
+    };
+    if o_mode == Mode::Link || t_mode == Mode::Link || o_mode == Mode::Submodule || t_mode == Mode::Submodule {
+        if let Some(v) = whole {
+            return Ok((v, None));
+        }
+    }
     if o_mode == Mode::Link || t_mode == Mode::Link {
         return Ok(((o_mode, o_id), Some("symlink changed on both sides; kept ours")));
     }
@@ -610,6 +721,9 @@ fn merge_file(
     let (ours_data, theirs_data) = (blob(&o_id)?, blob(&t_id)?);
     let as_text = |d: &[u8]| std::str::from_utf8(d).ok().filter(|s| !s.contains('\0')).map(str::to_owned);
     let (Some(bt), Some(ot), Some(tt)) = (as_text(&base_data), as_text(&ours_data), as_text(&theirs_data)) else {
+        if let Some(v) = whole {
+            return Ok((v, None));
+        }
         return Ok(((o_mode, o_id), Some("binary file changed on both sides; kept ours")));
     };
     let (text, n) = merge_text(&bt, &ot, &tt, ours_label, theirs_label);

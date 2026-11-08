@@ -10,68 +10,180 @@ use crate::objects::{Id, Kind, Mode};
 use crate::repo::Repo;
 use crate::worktree::{Changes, File, Index};
 use anyhow::{bail, Result};
-use similar::{DiffOp, DiffTag, TextDiff};
-use std::collections::{BTreeMap, HashMap};
+use similar::{DiffTag, TextDiff};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, Write};
 
+/// One line of a hunk.
+#[derive(Clone, Debug)]
+pub struct Line {
+    /// ' ' context, '-' removed, '+' added
+    pub mark: char,
+    /// The line, without its newline.
+    pub text: String,
+    /// For a removed or added line: its number among all the file's changed lines
+    /// (what a pick is made of).
+    pub change: Option<usize>,
+    /// Where it sits (0-based) in the old and new file; for an added line, `old`
+    /// is the old line it comes before, and the other way round for a removed one.
+    old: usize,
+    new: usize,
+}
+
 /// One change within a file, with a few lines of context around it.
+#[derive(Clone, Debug)]
 pub struct Hunk {
     /// "@@ -10,7 +10,8 @@"
     pub header: String,
-    /// (' ' context, '-' removed, '+' added, line text without its newline)
-    pub lines: Vec<(char, String)>,
+    pub lines: Vec<Line>,
+    /// The changed lines it holds (numbers among all the file's changed lines).
+    pub changes: std::ops::Range<usize>,
+    /// Its separate runs of changes, for splitting it smaller (`s`).
+    pieces: Vec<std::ops::Range<usize>>,
 }
 
-fn groups<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> Vec<Vec<DiffOp>> {
-    diff.grouped_ops(3)
+impl Hunk {
+    fn from_lines(lines: Vec<Line>, pieces: Vec<std::ops::Range<usize>>) -> Hunk {
+        let changed: Vec<usize> = lines.iter().filter_map(|l| l.change).collect();
+        let changes = match (changed.first(), changed.last()) {
+            (Some(a), Some(b)) => *a..*b + 1,
+            _ => 0..0,
+        };
+        let old_n = lines.iter().filter(|l| l.mark != '+').count();
+        let new_n = lines.iter().filter(|l| l.mark != '-').count();
+        let (o0, n0) = lines.first().map(|l| (l.old, l.new)).unwrap_or((0, 0));
+        let start = |at: usize, n: usize| if n == 0 { at } else { at + 1 };
+        let header = format!("@@ -{},{old_n} +{},{new_n} @@", start(o0, old_n), start(n0, new_n));
+        Hunk { header, lines, changes, pieces }
+    }
+
+    /// Whether `s` can split it into smaller hunks.
+    pub fn can_split(&self) -> bool {
+        self.pieces.len() > 1
+    }
+
+    /// The smaller hunks it splits into: one per run of changes, with the context
+    /// lines around each (as git's `s` does).
+    pub fn split(&self) -> Vec<Hunk> {
+        self.pieces
+            .iter()
+            .map(|piece| {
+                let inside = |l: &Line| l.change.is_some_and(|c| piece.contains(&c));
+                let first = self.lines.iter().position(inside).unwrap_or(0);
+                let last = self.lines.iter().rposition(inside).unwrap_or(0);
+                let mut a = first;
+                while a > 0 && first - a < 3 && self.lines[a - 1].mark == ' ' {
+                    a -= 1;
+                }
+                let mut b = last;
+                while b + 1 < self.lines.len() && b - last < 3 && self.lines[b + 1].mark == ' ' {
+                    b += 1;
+                }
+                Hunk::from_lines(self.lines[a..=b].to_vec(), vec![piece.clone()])
+            })
+            .collect()
+    }
+
+    /// The hunk as diff text ("@@ ...", then " ", "-", "+" lines).
+    pub fn text(&self) -> String {
+        let mut t = format!("{}\n", self.header);
+        for l in &self.lines {
+            t += &format!("{}{}\n", l.mark, l.text);
+        }
+        t
+    }
 }
 
 /// The hunks that turn `old` into `new`.
 pub fn hunks(old: &str, new: &str) -> Vec<Hunk> {
     let diff = TextDiff::from_lines(old, new);
-    groups(&diff)
+    let mut next_change = 0;
+    diff.grouped_ops(3)
         .into_iter()
         .map(|group| {
-            let (first, last) = (group.first().unwrap(), group.last().unwrap());
-            let (o0, o1) = (first.old_range().start, last.old_range().end);
-            let (n0, n1) = (first.new_range().start, last.new_range().end);
-            let header = format!("@@ -{},{} +{},{} @@", o0 + 1, o1 - o0, n0 + 1, n1 - n0);
             let mut lines = Vec::new();
+            let mut pieces = Vec::new();
             for op in &group {
+                let first = next_change;
+                let (mut o, mut n) = (op.old_range().start, op.new_range().start);
                 for change in diff.iter_changes(op) {
-                    let mark = match change.tag() {
-                        similar::ChangeTag::Equal => ' ',
-                        similar::ChangeTag::Delete => '-',
-                        similar::ChangeTag::Insert => '+',
+                    let text = change.value().trim_end_matches('\n').to_string();
+                    let (mark, num) = match change.tag() {
+                        similar::ChangeTag::Equal => (' ', None),
+                        similar::ChangeTag::Delete => ('-', Some(next_change)),
+                        similar::ChangeTag::Insert => ('+', Some(next_change)),
                     };
-                    lines.push((mark, change.value().trim_end_matches('\n').to_string()));
+                    lines.push(Line { mark, text, change: num, old: o, new: n });
+                    match mark {
+                        ' ' => {
+                            o += 1;
+                            n += 1;
+                        }
+                        '-' => o += 1,
+                        _ => n += 1,
+                    }
+                    if num.is_some() {
+                        next_change += 1;
+                    }
+                }
+                if next_change > first {
+                    pieces.push(first..next_change);
                 }
             }
-            Hunk { header, lines }
+            Hunk::from_lines(lines, pieces)
         })
         .collect()
 }
 
-/// `old` with only the hunks marked in `take` applied (in the order `hunks` gives them).
+/// How many changed lines (removed plus added) turn `old` into `new`.
+pub fn changed_lines(hunks: &[Hunk]) -> usize {
+    hunks.last().map_or(0, |h| h.changes.end)
+}
+
+/// `old` with only the changed lines marked in `take` applied (numbered as in
+/// `hunks`): an untaken removal keeps the old line, an untaken addition leaves the
+/// new one out.
 pub fn apply(old: &str, new: &str, take: &[bool]) -> String {
     let diff = TextDiff::from_lines(old, new);
-    // Which hunk each change belongs to.
-    let mut owner: HashMap<(usize, usize), usize> = HashMap::new();
-    for (g, group) in groups(&diff).iter().enumerate() {
-        for op in group.iter().filter(|op| op.tag() != DiffTag::Equal) {
-            owner.insert((op.old_range().start, op.new_range().start), g);
-        }
-    }
     let (olds, news) = (diff.old_slices(), diff.new_slices());
     let mut out = String::with_capacity(new.len().max(old.len()));
+    // A kept last line without a newline, followed by an added line, gets one
+    // (otherwise the two would run together).
+    let push = |out: &mut String, l: &str| {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(l);
+    };
+    let mut k = 0;
     for op in diff.ops() {
-        let taken = op.tag() != DiffTag::Equal && owner.get(&(op.old_range().start, op.new_range().start)).is_some_and(|g| take.get(*g) == Some(&true));
-        let lines = if taken { &news[op.new_range()] } else { &olds[op.old_range()] };
-        for l in lines {
-            out.push_str(l);
+        if op.tag() == DiffTag::Equal {
+            olds[op.old_range()].iter().for_each(|l| push(&mut out, l));
+            continue;
+        }
+        for l in &olds[op.old_range()] {
+            if take.get(k) != Some(&true) {
+                push(&mut out, l);
+            }
+            k += 1;
+        }
+        for l in &news[op.new_range()] {
+            if take.get(k) == Some(&true) {
+                push(&mut out, l);
+            }
+            k += 1;
         }
     }
     out
+}
+
+/// Each hunk's pick, as a pick of its changed lines.
+pub fn lines_of(hunks: &[Hunk], take_hunks: &[bool]) -> Vec<bool> {
+    let mut take = vec![false; changed_lines(hunks)];
+    for (h, t) in hunks.iter().zip(take_hunks) {
+        take[h.changes.clone()].iter_mut().for_each(|x| *x = *t);
+    }
+    take
 }
 
 pub fn text(data: &[u8]) -> Option<&str> {
@@ -80,9 +192,9 @@ pub fn text(data: &[u8]) -> Option<&str> {
 
 fn show_hunk(path: &str, h: &Hunk, n: usize, of: usize) {
     println!("{} {}  {}", paint("1", path), paint("36", &h.header), paint("2", &format!("(change {n} of {of})")));
-    for (mark, line) in &h.lines {
-        let s = format!("{mark}{line}");
-        println!("{}", match mark {
+    for l in &h.lines {
+        let s = format!("{}{}", l.mark, l.text);
+        println!("{}", match l.mark {
             '+' => paint("32", &s),
             '-' => paint("31", &s),
             _ => s,
@@ -94,8 +206,19 @@ fn show_hunk(path: &str, h: &Hunk, n: usize, of: usize) {
 pub enum Question<'a> {
     /// A whole file: new, deleted, not text, or only its mode changed. Answers y/n/q.
     Whole { path: &'a str, prompt: String },
-    /// One hunk of a text file (`n` of `of`, from 1). Answers y/n/a/d/q.
+    /// A text file, before its hunks: answered with every line's pick at once
+    /// (picked beforehand), or a key to go hunk by hunk.
+    File { path: &'a str, hunks: &'a [Hunk] },
+    /// One hunk of a text file (`n` of `of`, from 1). Answers y/n/a/d/q, s (split),
+    /// e (edit), or the lines to take.
     Hunk { path: &'a str, hunk: &'a Hunk, n: usize, of: usize },
+}
+
+pub enum Answer {
+    Key(char),
+    /// Which changed lines to take: for a File question, all of the file's; for a
+    /// Hunk question, the hunk's own.
+    Take(Vec<bool>),
 }
 
 /// Ask a question; returns the first letter answered (EOF counts as q).
@@ -112,15 +235,76 @@ fn ask(input: &mut dyn BufRead, question: &str) -> char {
     }
 }
 
+/// Edit a hunk in the editor, as git's `e` does: delete `+` lines you don't want,
+/// turn `-` lines you want to keep into context (a space). Returns the pick of the
+/// hunk's changed lines.
+pub fn edit_hunk(repo: &Repo, path: &str, h: &Hunk) -> Result<Vec<bool>> {
+    let file = repo.wt.join("HUNK_EDIT.diff");
+    let mut text = format!(
+        "# Editing a change in {path}. To leave out an added (+) line, delete it.\n\
+         # To keep a removed (-) line, change its '-' to a space. Lines starting\n\
+         # with # are ignored. Delete everything to leave the whole change out.\n"
+    );
+    text += &h.text();
+    std::fs::write(&file, &text)?;
+    let edited = crate::rebase::run_editor(&file).and_then(|_| Ok(std::fs::read_to_string(&file)?));
+    let _ = std::fs::remove_file(&file);
+    let edited = edited?;
+    let lines: Vec<&str> = edited.lines().filter(|l| !l.starts_with('#') && !l.starts_with("@@")).collect();
+    let mut take = vec![false; h.changes.len()];
+    let mut at = 0; // position in the edited lines
+    for l in &h.lines {
+        let next = lines.get(at).copied();
+        let matches = |mark: char| next.is_some_and(|n| n.strip_prefix(mark) == Some(l.text.as_str()) || (n.is_empty() && mark == ' ' && l.text.is_empty()));
+        match l.mark {
+            ' ' => {
+                if !matches(' ') {
+                    bail!("the context line {:?} was changed; only delete + lines or turn - into a space", l.text);
+                }
+                at += 1;
+            }
+            '+' => {
+                if matches('+') {
+                    take[l.change.unwrap() - h.changes.start] = true;
+                    at += 1;
+                }
+            }
+            _ => {
+                if matches('-') {
+                    take[l.change.unwrap() - h.changes.start] = true;
+                    at += 1;
+                } else if matches(' ') {
+                    at += 1;
+                } else {
+                    bail!("the removed line {:?} is gone; to keep it, change its '-' to a space instead", l.text);
+                }
+            }
+        }
+    }
+    if at < lines.len() && lines[at..].iter().any(|l| !l.trim().is_empty()) {
+        bail!("the edited change has lines that weren't in it; only delete + lines or turn - into a space");
+    }
+    Ok(take)
+}
+
 /// Answers typed at the terminal: `copse commit -p`.
-pub fn ask_terminal(input: &mut dyn BufRead) -> impl FnMut(&Question) -> Result<char> + '_ {
+pub fn ask_terminal<'a>(repo: &'a Repo, input: &'a mut dyn BufRead) -> impl FnMut(&Question) -> Result<Answer> + 'a {
     move |q| {
         Ok(match q {
-            Question::Whole { prompt, .. } => ask(input, &format!("{prompt} [y]es [n]o [q]uit:")),
-            Question::Hunk { path, hunk, n, of } => {
+            Question::Whole { prompt, .. } => Answer::Key(ask(input, &format!("{prompt} [y]es [n]o [q]uit:"))),
+            Question::File { .. } => Answer::Key('?'), // go hunk by hunk
+            Question::Hunk { path, hunk, n, of } => loop {
                 show_hunk(path, hunk, *n, *of);
-                ask(input, "Commit this change? [y]es [n]o [a]ll the rest of this file [d]one with this file [q]uit:")
-            }
+                let split = if hunk.can_split() { " [s]plit" } else { "" };
+                match ask(input, &format!("Commit this change? [y]es [n]o [a]ll the rest of this file [d]one with this file{split} [e]dit [q]uit:")) {
+                    'e' => match edit_hunk(repo, path, hunk) {
+                        Ok(take) => break Answer::Take(take),
+                        Err(e) => println!("{} {e:#}", paint("31", "Not used:")),
+                    },
+                    's' if !hunk.can_split() => println!("{}", paint("2", "This change can't be split any smaller.")),
+                    c => break Answer::Key(c),
+                }
+            },
         })
     }
 }
@@ -131,42 +315,55 @@ pub enum Choice {
     All,
     /// One entry per hunk, in order.
     Hunks(Vec<bool>),
+    /// One entry per changed line (removed and added lines, in order).
+    Lines(Vec<bool>),
 }
 
-/// "*:PATH" (the whole file) or "0110:PATH" (one digit per hunk): `commit --pick`.
+/// "*:PATH" (the whole file), "h0110:PATH" or "0110:PATH" (one digit per hunk), or
+/// "l0011101:PATH" (one digit per changed line): `commit --pick`.
 pub fn parse_choice(spec: &str) -> Result<(String, Choice)> {
-    let Some((how, path)) = spec.split_once(':') else { bail!("--pick takes *:PATH or 0101:PATH, not {spec:?}") };
+    let bad = || anyhow::anyhow!("--pick takes *:PATH, 0101:PATH (per hunk) or l0101:PATH (per line), not {spec:?}");
+    let (how, path) = spec.split_once(':').ok_or_else(bad)?;
+    let bits = |b: &str| -> Option<Vec<bool>> { (!b.is_empty() && b.bytes().all(|c| c == b'0' || c == b'1')).then(|| b.bytes().map(|c| c == b'1').collect()) };
     let choice = match how {
         "*" => Choice::All,
-        bits if !bits.is_empty() && bits.bytes().all(|b| b == b'0' || b == b'1') => Choice::Hunks(bits.bytes().map(|b| b == b'1').collect()),
-        _ => bail!("--pick takes *:PATH or 0101:PATH, not {spec:?}"),
+        _ if how.starts_with('l') => Choice::Lines(bits(&how[1..]).ok_or_else(bad)?),
+        _ if how.starts_with('h') => Choice::Hunks(bits(&how[1..]).ok_or_else(bad)?),
+        _ => Choice::Hunks(bits(how).ok_or_else(bad)?),
     };
     Ok((path.to_string(), choice))
 }
 
-/// Answers decided beforehand. A file whose hunks no longer match what was picked
-/// (it changed since) is refused rather than guessed at.
-pub fn answers(choices: &BTreeMap<String, Choice>) -> impl FnMut(&Question) -> Result<char> + '_ {
+/// Answers decided beforehand. A file whose changes no longer match what was
+/// picked (it changed since) is refused rather than guessed at.
+pub fn answers(choices: &BTreeMap<String, Choice>) -> impl FnMut(&Question) -> Result<Answer> + '_ {
+    let stale = |path: &str| anyhow::anyhow!("{path} changed since its changes were picked; pick again");
     move |q| {
         Ok(match q {
             Question::Whole { path, .. } => match choices.get(*path) {
-                Some(Choice::All) => 'y',
-                Some(Choice::Hunks(_)) => bail!("{path} can only be committed whole now (it changed since its changes were picked); pick it again"),
-                None => 'n',
+                Some(Choice::All) => Answer::Key('y'),
+                Some(_) => bail!("{path} can only be committed whole now (it changed since its changes were picked); pick it again"),
+                None => Answer::Key('n'),
             },
-            Question::Hunk { path, n, of, .. } => match choices.get(*path) {
-                Some(Choice::All) => 'a',
-                Some(Choice::Hunks(take)) if take.len() == *of => if take[n - 1] { 'y' } else { 'n' },
-                Some(Choice::Hunks(take)) => bail!("{path} now has {of} change(s), not the {} that were picked from (it changed since); pick again", take.len()),
-                None => 'd',
-            },
+            Question::File { path, hunks } => {
+                let total = changed_lines(hunks);
+                Answer::Take(match choices.get(*path) {
+                    Some(Choice::All) => vec![true; total],
+                    Some(Choice::Hunks(t)) if t.len() == hunks.len() => lines_of(hunks, t),
+                    Some(Choice::Hunks(t)) => bail!("{path} now has {} change(s), not the {} that were picked from (it changed since); pick again", hunks.len(), t.len()),
+                    Some(Choice::Lines(t)) if t.len() == total => t.clone(),
+                    Some(Choice::Lines(_)) => return Err(stale(path)),
+                    None => vec![false; total],
+                })
+            }
+            Question::Hunk { .. } => Answer::Key('d'), // not reached: files are answered whole
         })
     }
 }
 
 /// Go through the changes in scope, asking about each. Returns what to commit for
 /// each path the user picked something in: Some((mode, blob)) or None (deleted).
-pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: &dyn Fn(&str) -> bool, answer: &mut dyn FnMut(&Question) -> Result<char>) -> Result<BTreeMap<String, Option<(Mode, Id)>>> {
+pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: &dyn Fn(&str) -> bool, answer: &mut dyn FnMut(&Question) -> Result<Answer>) -> Result<BTreeMap<String, Option<(Mode, Id)>>> {
     let by_path: HashMap<&str, &File> = files.iter().map(|f| (f.path.as_str(), f)).collect();
     let mut paths: Vec<(&String, char)> = Vec::new();
     paths.extend(ch.modified.iter().map(|p| (p, 'M')));
@@ -175,8 +372,12 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
     paths.retain(|(p, _)| in_scope(p));
     paths.sort();
     let mut chosen = BTreeMap::new();
+    let key = |a: Answer| match a {
+        Answer::Key(c) => c,
+        Answer::Take(_) => '?',
+    };
     'files: for (path, kind) in paths {
-        let mut whole = |prompt: String| answer(&Question::Whole { path, prompt });
+        let mut whole = |prompt: String| -> Result<char> { Ok(key(answer(&Question::Whole { path, prompt })?)) };
         match kind {
             'A' => {
                 let f = by_path[path.as_str()];
@@ -224,31 +425,51 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
                     }
                     continue;
                 }
-                let mut take = vec![false; hs.len()];
-                let mut rest: Option<bool> = None; // a = take the rest, d = skip the rest
-                for (i, h) in hs.iter().enumerate() {
-                    if let Some(all) = rest {
-                        take[i] = all;
-                        continue;
-                    }
-                    match answer(&Question::Hunk { path, hunk: h, n: i + 1, of: hs.len() })? {
-                        'y' => take[i] = true,
-                        'a' => {
-                            take[i] = true;
-                            rest = Some(true);
-                        }
-                        'd' => rest = Some(false),
-                        'q' => {
-                            if take.iter().any(|t| *t) {
-                                chosen.insert(path.clone(), Some(build(repo, old_t, new_t, &take, old_mode, f)?));
+                let mut take = vec![false; changed_lines(&hs)];
+                let mut quit = false;
+                match answer(&Question::File { path, hunks: &hs })? {
+                    Answer::Take(t) => take = t,
+                    Answer::Key(_) => {
+                        // Hunk by hunk; split hunks go to the front of the queue.
+                        let mut queue: VecDeque<Hunk> = hs.iter().cloned().collect();
+                        let (mut n, mut of) = (0, hs.len());
+                        let mut rest: Option<bool> = None; // a = take the rest, d = skip the rest
+                        while let Some(h) = queue.pop_front() {
+                            if let Some(all) = rest {
+                                take[h.changes.clone()].iter_mut().for_each(|x| *x = all);
+                                continue;
                             }
-                            break 'files;
+                            n += 1;
+                            match answer(&Question::Hunk { path, hunk: &h, n, of })? {
+                                Answer::Take(t) => take[h.changes.clone()].copy_from_slice(&t),
+                                Answer::Key('y') => take[h.changes.clone()].iter_mut().for_each(|x| *x = true),
+                                Answer::Key('a') => {
+                                    take[h.changes.clone()].iter_mut().for_each(|x| *x = true);
+                                    rest = Some(true);
+                                }
+                                Answer::Key('d') => rest = Some(false),
+                                Answer::Key('s') if h.can_split() => {
+                                    let parts = h.split();
+                                    of += parts.len() - 1;
+                                    n -= 1;
+                                    for p in parts.into_iter().rev() {
+                                        queue.push_front(p);
+                                    }
+                                }
+                                Answer::Key('q') => {
+                                    quit = true;
+                                    break;
+                                }
+                                Answer::Key(_) => {}
+                            }
                         }
-                        _ => {}
                     }
                 }
                 if take.iter().any(|t| *t) {
                     chosen.insert(path.clone(), Some(build(repo, old_t, new_t, &take, old_mode, f)?));
+                }
+                if quit {
+                    break 'files;
                 }
             }
         }
@@ -256,7 +477,7 @@ pub fn pick(repo: &Repo, index: &Index, files: &[File], ch: &Changes, in_scope: 
     Ok(chosen)
 }
 
-/// The file as it would be with only the picked hunks: stored as a blob.
+/// The file as it would be with only the picked lines: stored as a blob.
 fn build(repo: &Repo, old: &str, new: &str, take: &[bool], old_mode: Mode, f: &File) -> Result<(Mode, Id)> {
     if take.iter().all(|t| *t) {
         return Ok((f.mode, f.id)); // everything: exactly the file on disk
@@ -268,7 +489,7 @@ fn build(repo: &Repo, old: &str, new: &str, take: &[bool], old_mode: Mode, f: &F
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, hunks};
+    use super::{apply, changed_lines, hunks, lines_of};
 
     #[test]
     fn picks_some_hunks() {
@@ -276,13 +497,44 @@ mod tests {
         let new = old.replace("line 3\n", "LINE THREE\n").replace("line 25\n", "LINE 25\nextra\n");
         let hs = hunks(&old, &new);
         assert_eq!(hs.len(), 2, "two separate changes make two hunks");
-        assert_eq!(apply(&old, &new, &[true, true]), new);
-        assert_eq!(apply(&old, &new, &[false, false]), old);
-        let first_only = apply(&old, &new, &[true, false]);
+        let pick = |t: &[bool]| apply(&old, &new, &lines_of(&hs, t));
+        assert_eq!(pick(&[true, true]), new);
+        assert_eq!(pick(&[false, false]), old);
+        let first_only = pick(&[true, false]);
         assert!(first_only.contains("LINE THREE") && !first_only.contains("extra") && first_only.contains("line 25\n"));
-        let second_only = apply(&old, &new, &[false, true]);
+        let second_only = pick(&[false, true]);
         assert!(!second_only.contains("LINE THREE") && second_only.contains("LINE 25\nextra\n"));
-        assert!(hs[0].header.starts_with("@@ -1,6 +1,6 @@"));
+        assert_eq!(hs[0].header, "@@ -1,6 +1,6 @@");
+        assert_eq!(hs[1].header, "@@ -22,7 +22,8 @@");
+    }
+
+    #[test]
+    fn single_lines() {
+        let old = "a\nb\nc\n";
+        let new = "a\nB\nX\nc\n";
+        let hs = hunks(old, new);
+        // changed lines, in order: -b, +B, +X
+        assert_eq!(changed_lines(&hs), 3);
+        assert_eq!(apply(old, new, &[false, false, true]), "a\nb\nX\nc\n", "keep b, add only X");
+        assert_eq!(apply(old, new, &[true, false, false]), "a\nc\n", "just the removal");
+        assert_eq!(apply(old, new, &[true, true, false]), "a\nB\nc\n");
+    }
+
+    #[test]
+    fn splitting() {
+        let old: String = (1..=12).map(|i| format!("{i}\n")).collect();
+        let new = old.replace("3\n", "three\n").replace("8\n", "eight\n");
+        let hs = hunks(&old, &new);
+        assert_eq!(hs.len(), 1, "close changes share a hunk");
+        assert!(hs[0].can_split());
+        let parts = hs[0].split();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].header, "@@ -1,6 +1,6 @@");
+        assert_eq!(parts[1].header, "@@ -5,7 +5,7 @@");
+        assert!(!parts[0].can_split());
+        let mut take = vec![false; changed_lines(&hs)];
+        take[parts[1].changes.clone()].iter_mut().for_each(|t| *t = true);
+        assert_eq!(apply(&old, &new, &take), old.replace("8\n", "eight\n"));
     }
 
     #[test]
@@ -290,7 +542,8 @@ mod tests {
         let old = "a\nb\nc";
         let new = "a\nB\nc\nd";
         let hs = hunks(old, new);
-        assert_eq!(apply(old, new, &vec![true; hs.len()]), new);
-        assert_eq!(apply(old, new, &vec![false; hs.len()]), old);
+        let n = changed_lines(&hs);
+        assert_eq!(apply(old, new, &vec![true; n]), new);
+        assert_eq!(apply(old, new, &vec![false; n]), old);
     }
 }

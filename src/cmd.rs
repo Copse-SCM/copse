@@ -303,7 +303,7 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
         let stdin = std::io::stdin();
         let mut input = stdin.lock();
         let picked = if choices.is_empty() {
-            crate::hunks::pick(&repo, &index, &files, &ch, &in_scope, &mut crate::hunks::ask_terminal(&mut input))?
+            crate::hunks::pick(&repo, &index, &files, &ch, &in_scope, &mut crate::hunks::ask_terminal(&repo, &mut input))?
         } else {
             crate::hunks::pick(&repo, &index, &files, &ch, &in_scope, &mut crate::hunks::answers(&choices))?
         };

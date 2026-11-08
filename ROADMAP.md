@@ -37,12 +37,13 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | `init`, `init --bare` | ✅ | |
 | `status` | ✅ | Where you stand against origin (ahead/behind); `--porcelain` for scripts and editors |
 | Staging area (`add`) | ➖ | `commit` snapshots everything that isn't ignored |
-| Commit only some files (`commit <paths>`) | ✅ | Whole files or folders, or pick changes within files with `commit -p` (like `add -p`) |
+| Commit only some files (`commit <paths>`) | ✅ | Whole files or folders, or pick changes within files with `commit -p` (like `add -p`, with split and edit), or single lines in the TUI |
 | `commit -m` | ✅ | |
 | `commit --amend` | ✅ | Keeps author and date; with or without a new message; can take paths |
 | `diff` | ✅ | Your files or any revision vs any revision, `A..B`, `--stat` (matches git's), `-- paths` |
-| `log` | ✅ | Whole history, `--oneline`, `--graph` (matches git's drawing), `-p`, `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-- paths` |
-| `show` | ✅ | Commits and annotated tags, `--stat` |
+| `log` | ✅ | Whole history, `--oneline`, `--graph` (matches git's drawing), `-p`, `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-- paths`, `--pretty`/`--format` (git's named formats and placeholders), `--date` |
+| `show` | ✅ | Commits and annotated tags, `--stat`, `REV:path` |
+| Plumbing (`cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`) | ✅ | git's output formats; revisions with `^N`, `@`, `^{tree}`, `REV:path` |
 | `mv` / `rm` | ➖ | Renames and deletions are picked up automatically |
 | `.gitignore` | ✅ | Per-folder `.gitignore` and `.copseignore`, a global ignore file (`core.excludesFile`), and `.copse/exclude` |
 | `clean` | ✅ | Lists by default; `-f` backs up to a stash first; `-x` for ignored files |
@@ -55,7 +56,7 @@ Status: ✅ done · 🟡 partial · ❌ not yet · ➖ not needed by design
 | `checkout` / `switch` | ✅ | Branches, ids, `HEAD~N`, `origin/main` |
 | `restore` (files or folders, from any commit) | ✅ | Saves uncommitted edits as a stash before overwriting them |
 | `reset` (default and `--hard`) | ✅ | Default keeps your files (git's `--soft`/`--mixed` are the same without a staging area); `--hard` backs up uncommitted work first; `undo` reverses either |
-| `merge` | ✅ | `--no-ff`, `--ff-only`, `-m`; follows renames and folder moves, as git does (also in rebase, cherry-pick, revert, stash); fast-forwards touch only changed files. No merge strategies |
+| `merge` | ✅ | `--no-ff`, `--ff-only`, `-m`; follows renames and folder moves, as git does (also in rebase, cherry-pick, revert, stash); fast-forwards touch only changed files. `-s ours`; `-X ours`/`theirs`/`no-renames` (also on pull, rebase, cherry-pick, revert) |
 | `rebase`, `rebase -i` | ✅ | All six actions plus `exec`, `--onto`, `--autosquash`, `-x` |
 | `cherry-pick`, `revert` | ✅ | Single commits and ranges, conflicts with continue/skip/abort, merges with `-m N` |
 | `stash` | ✅ | Including only some files (`copse stash -- paths`) |

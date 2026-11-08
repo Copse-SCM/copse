@@ -81,6 +81,32 @@ printf 'y\nA message typed after picking\n' | cps commit -p >/dev/null && same "
 printf 'bin\0ARY' > b.bin && printf 'y\n' | NO_COLOR=1 cps commit -p -m bin | has "(not text): commit the change?" && ok "files that aren't text are all-or-nothing" || fail "line $LINENO: a step before this check failed"
 mkdir -p sub && echo s > sub/s.txt && echo t > top2.txt && printf 'y\n' | cps commit -p -m "just sub" sub >/dev/null && cps show | has "sub/s.txt" && ! cps show | has "top2.txt" && ok "-p with a path asks only about changes there" || fail "line $LINENO: a step before this check failed"
 expect_fail "-p and --amend don't mix" "don't go together" cps commit -p --amend -m x
+cps commit -m sync3 >/dev/null 2>&1 || true
+seq 1 12 > s.txt && cps commit -m "twelve" >/dev/null
+sedi -e 's/^3$/three/' -e 's/^8$/eight/' s.txt
+out=$(printf 's\nn\ny\n' | NO_COLOR=1 cps commit -p -m "split" -- s.txt); [[ "$out" == *"[s]plit"* && "$out" == *"(change 1 of 2)"* && "$out" == *"@@ -5,7 +5,7 @@"* ]] && ok "s splits a change into smaller ones (with git's line numbers)" || fail "$out"
+cps show | has "+eight" && ! cps show | has "+three" && ok "and each part is picked on its own" || fail "line $LINENO: a step before this check failed"
+cps commit -m sync4 >/dev/null && seq 1 12 > s.txt && cps commit -m plain >/dev/null
+seq 1 12 | sed -e 's/^3$/three/' -e 's/^4$/four/' > s.txt
+cat > "$WORK/keep-three.sh" <<'ED'
+#!/bin/sh
+# Leave out the added "four", and keep the old "3" (its - turned into a space).
+perl -ni -e 'next if /^\+four$/; s/^-3$/ 3/; print' "$1"
+ED
+chmod +x "$WORK/keep-three.sh"
+printf 'e\n' | COPSE_EDITOR="$WORK/keep-three.sh" cps commit -p -m "edited" -- s.txt >/dev/null
+same "$(cps show HEAD:s.txt | sed -n '3,5p' | tr '\n' ',')" "3,three,5," "e edits a change: an added line left out, a removed line kept"
+same "$(sed -n '3,4p' s.txt | tr '\n' ',')" "three,four," "the file on disk keeps all of it"
+cat > "$WORK/bad-edit.sh" <<'ED'
+#!/bin/sh
+perl -pi -e 's/^\+four$/+FIVE/' "$1"
+ED
+chmod +x "$WORK/bad-edit.sh"
+out=$(printf 'e\nn\n' | NO_COLOR=1 COPSE_EDITOR="$WORK/bad-edit.sh" cps commit -p -m "bad" -- s.txt 2>&1 || true); [[ "$out" == *"Not used:"* ]] && ok "an edit that changes text is refused, and the question is asked again" || fail "$out"
+cps commit -m sync5 >/dev/null && seq 1 12 > s.txt && cps commit -m plain2 >/dev/null
+seq 1 12 | sed -e 's/^3$/three/' > s.txt
+cps commit -m "by line" --pick=l01:s.txt >/dev/null && same "$(cps show HEAD:s.txt | sed -n '3,4p' | tr '\n' ',')" "3,three," "--pick takes single lines (here: only the added line)"
+cps commit -m sync6 >/dev/null
 cps fsck | has "everything is intact" && ok "fsck agrees after all that" || fail "line $LINENO: a step before this check failed"
 cd ../repo   # where the next section expects to start
 
@@ -111,6 +137,37 @@ shape() { sed -E 's/[0-9a-f]{10} //; s/\([^)]*\) //; s/ +/ /g; s/ +$//'; }
 same "$(cps log --oneline --graph main | shape)" "$(git -C ../graph.git log --graph --format=%s main | shape)" "same lines and order as git log --graph"
 git -C ../graph.git log --format=%s --topo-order -- f > /dev/null
 same "$(titles -- f | tr ',' '\n' | sort)" "$(git -C ../graph.git log --format=%s -- f | sort)" "-- PATH picks the same commits as git"
+
+echo "== log --format / --pretty / --date match git"
+# History made with git (two authors and committers, timezones, a multi-line subject,
+# a body, a merge), cloned with copse: everything but the ids must print the same.
+cd .. && rm -rf fmt && mkdir fmt && cd fmt
+(
+  export GIT_AUTHOR_NAME="Ada L" GIT_AUTHOR_EMAIL=ada@ex.com GIT_COMMITTER_NAME="Bob C" GIT_COMMITTER_EMAIL=bob@ex.com
+  git init -q -b main g && cd g && echo a > a && git add a
+  GIT_AUTHOR_DATE="2025-03-04T05:06:07+0530" GIT_COMMITTER_DATE="2025-03-05T01:02:03-0800" git commit -qm "First: thing [x] (y)!"
+  git checkout -qb br && echo c > c && git add c && GIT_AUTHOR_DATE="2025-06-01T10:00:00+0200" GIT_COMMITTER_DATE="2025-06-01T10:00:00+0200" git commit -qm side && git checkout -q main
+  echo b > b && git add b && printf 'Second subject\ncontinues here\n\nBody one.\n\nBody two.\n' | GIT_AUTHOR_DATE="2026-01-01T00:00:00+0000" GIT_COMMITTER_DATE="2026-01-02T00:00:00+0000" git commit -q -F -
+  GIT_AUTHOR_DATE="2026-02-01T00:00:00-0300" GIT_COMMITTER_DATE="2026-02-01T00:00:00-0300" git merge -q --no-edit br
+)
+cps clone g c >/dev/null 2>&1 && cd c
+ids() { sed -E 's/[0-9a-f]{7,64}/ID/g'; }
+for p in oneline short medium full fuller reference raw; do
+  [[ "$(cps log --pretty=$p | ids)" == "$(git -C ../g log --pretty=$p | ids)" ]] || fail "--pretty=$p differs from git: $(diff <(cps log --pretty=$p | ids) <(git -C ../g log --pretty=$p | ids))"
+done
+ok "--pretty oneline, short, medium, full, fuller, reference and raw print what git prints"
+F='%an|%ae|%al|%ad|%aD|%at|%ai|%aI|%as|%cn|%ce|%cl|%cd|%cD|%ct|%ci|%cI|%cs|%s|%f|[%b]|[%B]|%%|%x41|%p|%P'
+same "$(cps log --format="$F" | ids)" "$(git -C ../g log --format="$F" | ids)" "--format placeholders: names, emails, every date form, subject, body, parents (same as git)"
+for d in iso iso-strict rfc short raw unix default; do
+  [[ "$(cps log --date=$d --format='%ad %cd')" == "$(git -C ../g log --date=$d --format='%ad %cd')" ]] || fail "--date=$d differs from git"
+done
+ok "--date iso, iso-strict, rfc, short, raw, unix and default (same as git)"
+same "$(cps log --pretty=format:%s | od -c)" "$(git -C ../g log --pretty=format:%s | od -c)" "format: separates entries, tformat: ends each one (same as git)"
+same "$(cps log --format=%h -n 1 | wc -c | tr -d ' ')" "11" "%h is copse's short id"
+cps log --format='%h %s' --graph | grep '^| \*\|^\* ' >/dev/null && ok "formats work with --graph" || fail "line $LINENO: a step before this check failed"
+expect_fail "unknown formats are refused" "unknown format" cps log --pretty=fancy
+expect_fail "unknown date styles are refused" "isn't supported" cps log --date=human
+cd ../../repo
 
 echo
 echo "All $pass checks passed."

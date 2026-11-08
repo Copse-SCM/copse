@@ -25,6 +25,7 @@ Everything copse does, command by command. For a quick start, see the [README](.
 - [Why it's faster than git](#why-its-faster-than-git)
 - [Layout](#layout)
 - [Benchmark](#benchmark)
+- [Plumbing for scripts](#plumbing-for-scripts)
 - [How it's tested](#how-its-tested)
 - [Not built yet](#not-built-yet)
 
@@ -45,7 +46,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
   - `F` fetch, `L` pull, `P` push (in the background: the screen keeps working, and shows what happened when it's done), `r` refresh, `?` help, `q` quit.
 - **The top line** shows the branch, whether you're in step with origin (`↑2 to push`, `↓1 to pull`), and how many changes you have.
 - **Every action runs the same `copse` command** you'd type and shows what it said, so the screen does exactly what the command line does. Anything that could lose work asks first and keeps a backup.
-- **Picking parts of a file:** `enter` on a modified file lists its changes; `space` picks each one you want, and `c` commits just those (as `copse commit -p` does). Files with some changes picked are marked `[~]`; your files on disk aren't touched.
+- **Picking parts of a file:** `enter` on a modified file lists its changes; `space` picks each one you want, `s` splits a change into smaller ones, and `l` goes into a change to pick single lines. `c` commits just what's picked (as `copse commit -p` does). Files with some changes picked are marked `[~]`; your files on disk aren't touched.
 - **It refreshes** every few seconds, so edits saved in your editor show up on their own.
 
 ## Commands
@@ -57,7 +58,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse status` (`st`) | List added (A), modified (M) and deleted (D) files, and say where you stand against `origin` (in step, commits to push or pull, or diverged) |
 | `copse status --porcelain` | The same in a stable, plain format for scripts and editors, one fact per line: `branch NAME` (or `branch (detached) ID`), `upstream origin/NAME AHEAD BEHIND`, `state merging` (or `rebasing`, `cherry-picking`, `reverting`, `bisecting`), then `A`/`M`/`D PATH` for each change, and `C PATH` for files with conflict markers. Never coloured, never reworded between versions. |
 | `copse commit -m "msg" [paths...]` (`ci`) | Snapshot every file that isn't ignored. There is no staging step: give paths to commit only changes under them, leaving the rest uncommitted. |
-| `copse commit -p [-m "msg"] [paths...]` | Pick which changes to commit, one at a time, like `git add -p`: for each change ("hunk") answer `y`/`n`, or `a` (the rest of this file), `d` (skip the rest of this file), `q` (stop). Only what you pick is committed; your files aren't touched, and the rest stays uncommitted. New files, deletions and non-text files are a single yes/no. |
+| `copse commit -p [-m "msg"] [paths...]` | Pick which changes to commit, one at a time, like `git add -p`: for each change ("hunk") answer `y`/`n`, or `a` (the rest of this file), `d` (skip the rest of this file), `s` (split it into smaller changes), `e` (edit it in your editor: delete `+` lines you don't want, turn `-` lines you want to keep into a space), `q` (stop). Only what you pick is committed; your files aren't touched, and the rest stays uncommitted. New files, deletions and non-text files are a single yes/no. |
 | `copse commit -S` / `--no-gpg-sign` | Sign the commit with your SSH or GPG key (git's format, so GitHub shows it as Verified); `commit.gpgSign` signs every commit |
 | `copse verify-commit [rev...]` | Check commits' signatures |
 | `copse tag -s <name> -m "..."` / `copse verify-tag <name>` | Make a signed tag (git's format); check a tag's signature |
@@ -65,13 +66,16 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse commit --amend [-m "msg"] [paths...]` | Replace the last commit with your current files, keeping its author and date (and its message unless you give a new one) |
 | `copse diff [rev [rev]] [--stat] [-- paths]` | Changes: your files against the last commit, against `rev`, or between two revisions (`A B` or `A..B`). `--stat` gives a per-file summary like git's; `-- paths` limits it to some files or folders. |
 | `copse show [rev] [--stat]` | One commit (default: the latest): author, date in the author's timezone, message, and exactly what it changed. Annotated tags show their own message first; merges list their parents. |
-| `copse log [rev...] [options] [-- paths]` | All of history, newest first, merged branches included. `--oneline`, `--graph`, `-p` (changes), `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-n`, and `-- paths` for commits that touched those paths. |
+| `copse show REV:path` | A file as it was in that commit (or a folder's listing), as git prints it: `copse show HEAD~2:src/main.rs`, `copse show v1.0:README.md`, `copse show :file` for the current commit's |
+| `copse log [rev...] [options] [-- paths]` | All of history, newest first, merged branches included. `--oneline`, `--graph`, `-p` (changes), `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-n`, and `-- paths` for commits that touched those paths. `--pretty`/`--format` take git's formats (`oneline`, `short`, `medium`, `full`, `fuller`, `reference`, `raw`) or a template with git's placeholders (`%h %an %ad %s`, `%b`, `%d`, colours...), and `--date` takes `iso`, `iso-strict`, `rfc`, `short`, `raw`, `unix` or `relative`; all checked against git's output. |
 | `copse branch [name [rev]]` | List branches, or create one (at the current commit, or at `rev`) |
 | `copse branch -d <name>` / `-D <name>` | Delete a branch. `-d` refuses if its work isn't merged into your current branch; `-D` deletes anyway. Either way, copse prints the command that brings it back. |
 | `copse branch -m [old] <new>` | Rename a branch (the current one if `old` is left out); `-M` replaces an existing name |
 | `copse merge <rev>` | Merge a branch or commit into the current branch (see below) |
 | `copse merge --abort` | Give up on a merge that stopped on conflicts |
 | `copse merge --no-ff` / `--ff-only` / `-m msg` | Always make a merge commit (keeping the branch's commits visible as a group), only fast-forward, or set the merge message |
+| `copse merge -X ours` / `-X theirs` | Where both sides changed the same lines (or the same binary file or symlink), take that side instead of stopping on a conflict. Everything else merges as usual. Also on `pull`, `rebase`, `cherry-pick` and `revert` (and kept through `--continue`). `-X no-renames` turns off rename detection. |
+| `copse merge -s ours` | Record a merge but keep the current branch's files exactly as they are (to mark a branch as dealt with). Always makes a merge commit. |
 | `copse stash [-m note]` | Put all uncommitted changes aside and reset to the last commit |
 | `copse stash -- <paths>` | Put aside only the changes to those files or folders, leaving the rest in place |
 | `copse stash list` / `show [n]` | List stashes (0 is newest), or show which files one changes |
@@ -511,6 +515,20 @@ Transfers between two folders on the same Mac, with git using `--no-local` so it
 
 After packing, objects take 86 MB in copse and 83 MB in git. Git can also store a file as a delta against a different, similar file. copse deliberately doesn't, so the newest version of every file is always whole and fast to read. Where copse's deltas apply (repeated edits to the same files), they're very effective: the test history in `tests/pack.sh` shrinks from 48.5 MB to 9.3 MB.
 
+## Plumbing for scripts
+
+Small commands with git's output formats, for scripts and tools. Ids are copse's own.
+
+| Command | What it does |
+|---|---|
+| `copse rev-parse REV...` | Full ids (`--short` for short ones). `--abbrev-ref HEAD` gives the branch, `--verify -q` checks a name quietly, `--show-toplevel`, `--git-dir`, `--is-inside-work-tree`, `--is-bare-repository` |
+| `copse cat-file -t\|-s\|-p\|-e OBJECT` | An object's type, size or contents; `-e` answers with the exit status. `cat-file blob OBJECT` gives raw contents |
+| `copse ls-tree [-r] [-d] [--name-only] REV [PATH]` | A folder of a commit, one `MODE TYPE ID<tab>NAME` line per entry |
+| `copse ls-files [-m] [-d] [-o]` | The tracked files, or only modified, deleted or untracked ones |
+| `copse hash-object [-w] [--stdin] FILE...` | The id a file would be stored under; `-w` stores it |
+
+Every command that takes a revision understands git's names: a branch, `origin/main`, a tag, an id prefix, `HEAD` or `@`, `main@{2}`, followed by `~N`, `^`, `^N`, `^{}` or `^{tree}`, and `REV:path` for a file or folder inside a commit.
+
 ## How it's tested
 
 Every suite builds real repositories in a fresh folder and checks what copse does, usually against git doing the same thing (git is the oracle). `tests/run-all.sh` runs them all and summarizes; CI runs it, plus `cargo test` and 150 stress-test rounds, on macOS and Linux for every push. The scripts work with both macOS and Linux tools, through `tests/portable.sh`. Build with `cargo build --release` first.
@@ -519,7 +537,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 |---|---|---|
 | `branches.sh` | 51 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
 | `bridge.sh` | 42 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
-| `commit.sh` | 45 | Partial commits, `commit -p`, `--amend`, and `log` (`--graph` and path filtering checked against git) |
+| `commit.sh` | 59 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
 | `github.sh` | 94 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user |
@@ -527,6 +545,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
 | `investigate.sh` | 33 | `blame` (every line compared with `git blame`) and `bisect` |
 | `layout.sh` | 61 | Tags between copse repositories, shallow clones, sparse checkout, worktrees |
+| `plumbing.sh` | 37 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
 | `rebase.sh` | 78 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 35 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
@@ -535,9 +554,9 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `security.sh` | 23 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 32 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |
-| `tui.sh` | 65 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
+| `tui.sh` | 70 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |
-| `workflow.sh` | 55 | `merge --no-ff`/`--ff-only`, folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
+| `workflow.sh` | 65 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
 
 `cargo test` runs unit tests for merging, hunks, the rebase list, timezones and git's formats (checked against hashes real git produces). `tests/fuzz.py` is a randomized stress test: it builds the same random histories in git and copse (edits, inserts, deletions, new files, renames, folder moves), then merges, rebases and cherry-picks in both and compares the results file by file. Run `tests/fuzz.py 500 <seed>`; 2,000 rounds across eight seeds match git exactly.
 
@@ -547,6 +566,5 @@ The logo lives in `assets/logo/`: the original design, plus versions tuned for e
 
 - **Windows.** copse is built and tested on macOS and Linux only.
 - **Shallow clones from git servers** (`--depth` works between copse repositories).
-- **Merge strategies** (`-s ours`, `-X theirs` and so on).
 
 [ROADMAP.md](../ROADMAP.md) has the full list, command by command.

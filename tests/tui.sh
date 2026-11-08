@@ -76,10 +76,21 @@ out=$(ui "enter,space,enter,c,text:Third line,enter"); echo "$out" | has "(picke
 cps show | has "+LINE THREE" && ! cps show | grep "LINE 25" >/dev/null && ok "the commit has the first change and not the second" || fail "line $LINENO: a step before this check failed"
 same "$(sha256 long.txt) $(cps status --porcelain | grep long)" "$on_disk M long.txt" "the file on disk is untouched, and the rest is still a change"
 cps diff -- long.txt | has "+LINE 25" && ! cps diff -- long.txt | grep "LINE THREE" >/dev/null && ok "and its diff is just the change left" || fail "line $LINENO: a step before this check failed"
+cps commit -m "rest of long first" >/dev/null && seq 1 30 | sed 's/^/line /' > long.txt && cps commit -m "plain long" >/dev/null
+seq 1 30 | sed 's/^/line /' | sed -e 's/^line 3$/LINE THREE/' -e 's/^line 4$/LINE FOUR/' > long.txt
+out=$(ui "enter,l"); echo "$out" | has "▸[ ] -line 3" && echo "$out" | has "single lines" && ok "l goes into a change, to pick single lines" || fail "$out"
+out=$(ui "enter,l,j,space,enter"); echo "$out" | has "[~] M long.txt" && ok "space picks one line" || fail "$out"
+ui "enter,l,j,j,space,enter,c,text:Just a line,enter" >/dev/null
+same "$(cps show HEAD:long.txt | sed -n '3,6p' | tr '\n' ',')" "line 3,line 4,LINE THREE,line 5," "c commits just that line (LINE THREE added; the old lines 3 and 4 kept)"
+cps commit -m "rest again" >/dev/null && seq 1 30 | sed 's/^/line /' > long.txt && cps commit -m "plain long again" >/dev/null
+seq 1 30 | sed 's/^/line /' | sed -e 's/^line 3$/LINE THREE/' -e 's/^line 8$/LINE EIGHT/' > long.txt
+out=$(ui "enter,s"); echo "$out" | has "Split into 2 changes." && echo "$out" | has "(1 of 2)" && ok "s splits a change in two" || fail "$out"
+ui "enter,s,j,space,enter,c,text:Eighth,enter" >/dev/null && cps show | has "+LINE EIGHT" && ! cps show | has "+LINE THREE" && ok "and each part can be picked on its own" || fail "line $LINENO: a step before this check failed"
+cps commit -m "rest of split" >/dev/null
 echo new > newfile.txt && ui "j,enter" | has "newfile.txt can only be committed whole" && ok "new files can only be picked whole" || fail "line $LINENO: a step before this check failed"
 rm newfile.txt
 seq 1 30 | sed 's/^/line /' | sed -e 's/^line 3$/LINE THREE/' -e 's/^line 25$/LINE 25/' -e 's/^line 14$/LINE 14/' > long.txt
-{ cps commit -m "stale" --pick=1:long.txt 2>&1 || true; } | has "now has 2 change(s), not the 1" && same "$(titles -n 1)" "Third line" "a pick made before the file changed again is refused, not guessed at" || fail "line $LINENO: a step before this check failed"
+{ cps commit -m "stale" --pick=1:long.txt 2>&1 || true; } | has "now has 2 change(s), not the 1" && same "$(titles -n 1)" "rest of split" "a pick made before the file changed again is refused, not guessed at" || fail "line $LINENO: a step before this check failed"
 cps commit -m "rest of long" >/dev/null
 
 echo "== History: revert, branch here, check out"

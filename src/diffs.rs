@@ -262,6 +262,10 @@ fn local_date(secs: i64, tz: &str) -> String {
 pub fn show(rev: Option<&str>, stat: bool) -> Result<()> {
     let repo = Repo::find_any()?;
     let rev = rev.unwrap_or("HEAD");
+    // REV:path, or a file's or folder's own id: its contents, as git shows them.
+    if rev.contains(':') || matches!(repo.resolve_object(rev).and_then(|id| Ok(repo.store.get(&id)?.0)), Ok(Kind::Blob | Kind::Tree)) {
+        return crate::plumbing::show_path(&repo, rev);
+    }
 
     // An annotated tag shows its own details first.
     if let Some(tag_id) = repo.tag(rev)? {

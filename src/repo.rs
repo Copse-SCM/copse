@@ -270,34 +270,101 @@ impl Repo {
     }
 
     /// Resolve `HEAD`, a branch name, or a commit id prefix, optionally followed by `~N`.
+    /// A commit, from any of git's ways of naming one: a branch, remote branch
+    /// (origin/main), tag, id prefix, HEAD or @, a reflog entry (main@{2}), followed
+    /// by any of ~N, ^, ^N, ^0 and ^{commit}.
     pub fn resolve(&self, rev: &str) -> Result<Id> {
-        let (base, back) = match rev.split_once('~') {
-            Some((b, "")) => (b, 1),
-            Some((b, n)) => (b, n.parse::<usize>().with_context(|| format!("bad revision: {rev}"))?),
-            None => (rev, 0),
-        };
-        let tracked = match base.split_once('/') {
-            Some((remote, branch)) => self.tracking(remote, branch)?,
-            None => None,
-        };
-        let reflog_pos = base.strip_suffix('}').and_then(|b| b.rsplit_once("@{")).and_then(|(name, n)| n.parse::<usize>().ok().map(|n| (name, n)));
-        let mut id = if let Some((name, n)) = reflog_pos {
-            crate::reflog::resolve(self, name, n)?
-        } else if base == "HEAD" || base.is_empty() {
-            self.head_commit()?.context("there are no commits yet")?
-        } else if let Some(id) = self.branch(base)? {
-            id
-        } else if let Some(id) = tracked {
-            id
-        } else if let Some(id) = self.tag(base)? {
-            self.peel(id)?
-        } else {
-            self.peel(self.store.find_prefix(base)?)?
-        };
-        for _ in 0..back {
-            id = *self.read_commit(&id)?.parents.first().context("history is shorter than that")?;
+        let id = self.resolve_object(rev)?;
+        self.peel(id).with_context(|| format!("{rev} isn't a commit"))
+    }
+
+    /// Any object: everything `resolve` takes, plus ids of trees, files and tags,
+    /// REV:path (a file or folder in that commit; :path for HEAD's), REV^{tree},
+    /// and REV^{} (an annotated tag's target).
+    pub fn resolve_object(&self, spec: &str) -> Result<Id> {
+        if let Some((rev, path)) = spec.split_once(':') {
+            let commit = self.resolve(if rev.is_empty() { "HEAD" } else { rev })?;
+            let tree = self.read_commit(&commit)?.tree;
+            let path = path.trim_matches('/');
+            if path.is_empty() {
+                return Ok(tree);
+            }
+            return crate::objects::entry_at(&self.store, &tree, path)?
+                .map(|(_, id)| id)
+                .with_context(|| format!("{path} isn't in {}", if rev.is_empty() { "HEAD" } else { rev }));
+        }
+        let cut = spec.find(['~', '^']).unwrap_or(spec.len());
+        let (base, mut suffix) = spec.split_at(cut);
+        let mut id = self.resolve_base(base).with_context(|| format!("unknown revision: {spec}"))?;
+        while !suffix.is_empty() {
+            let op = suffix.as_bytes()[0];
+            suffix = &suffix[1..];
+            if op == b'^' && suffix.starts_with('{') {
+                let end = suffix.find('}').with_context(|| format!("bad revision: {spec}"))?;
+                let want = &suffix[1..end];
+                suffix = &suffix[end + 1..];
+                id = match want {
+                    "" => self.peel_tags(id)?,
+                    "commit" => self.peel(id)?,
+                    "tree" => match self.store.get(&id)?.0 {
+                        Kind::Tree => id,
+                        _ => self.read_commit(&self.peel(id)?)?.tree,
+                    },
+                    other => bail!("^{{{other}}} isn't supported (use ^{{}}, ^{{commit}} or ^{{tree}})"),
+                };
+                continue;
+            }
+            let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+            let n: Option<usize> = if digits > 0 { Some(suffix[..digits].parse()?) } else { None };
+            suffix = &suffix[digits..];
+            id = self.peel(id)?;
+            if op == b'~' {
+                for _ in 0..n.unwrap_or(1) {
+                    id = *self.read_commit(&id)?.parents.first().context("history is shorter than that")?;
+                }
+            } else {
+                match n.unwrap_or(1) {
+                    0 => {}
+                    k => id = *self.read_commit(&id)?.parents.get(k - 1).with_context(|| format!("{} has no parent number {k}", short(&id)))?,
+                }
+            }
         }
         Ok(id)
+    }
+
+    /// The object a name points at, before any ~ or ^ (tags not peeled).
+    fn resolve_base(&self, base: &str) -> Result<Id> {
+        let reflog_pos = base.strip_suffix('}').and_then(|b| b.rsplit_once("@{")).and_then(|(name, n)| n.parse::<usize>().ok().map(|n| (name, n)));
+        if let Some((name, n)) = reflog_pos {
+            return crate::reflog::resolve(self, if name.is_empty() { "HEAD" } else { name }, n);
+        }
+        if base == "HEAD" || base == "@" || base.is_empty() {
+            return self.head_commit()?.context("there are no commits yet");
+        }
+        if let Some(id) = self.branch(base)? {
+            return Ok(id);
+        }
+        if let Some((remote, branch)) = base.split_once('/') {
+            if let Some(id) = self.tracking(remote, branch)? {
+                return Ok(id);
+            }
+        }
+        if let Some(id) = self.tag(base)? {
+            return Ok(id);
+        }
+        self.store.find_prefix(base)
+    }
+
+    /// Follow annotated tags to whatever they finally point at (any kind).
+    fn peel_tags(&self, mut id: Id) -> Result<Id> {
+        for _ in 0..16 {
+            let (kind, data) = self.store.get(&id)?;
+            if kind != Kind::Tag {
+                return Ok(id);
+            }
+            id = Tag::decode(&data)?.object;
+        }
+        bail!("tags nested too deeply at {}", short(&id))
     }
 
     /// A commit. At a shallow clone's boundary it has no parents (they weren't

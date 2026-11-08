@@ -244,7 +244,10 @@ pub fn fetch(remote: &str, depth: Depth) -> Result<()> {
 
 // ---------------------------------------------------------------- pull
 
-pub fn pull(remote: &str, branch: Option<&str>, rebase: bool) -> Result<()> {
+pub fn pull(remote: &str, branch: Option<&str>, rebase: bool, strategy: crate::merge::Strategy) -> Result<()> {
+    if rebase && strategy != crate::merge::Strategy::Normal {
+        bail!("-s ours doesn't go with --rebase");
+    }
     let repo = Repo::find()?;
     let branch = match branch {
         Some(b) => b.to_string(),
@@ -270,7 +273,7 @@ pub fn pull(remote: &str, branch: Option<&str>, rebase: bool) -> Result<()> {
     if rebase {
         crate::rebase::rebase(crate::rebase::RebaseArgs { upstream: Some(&target), ..Default::default() })
     } else {
-        crate::merge::merge(Some(&target), false, crate::merge::FastForward::Allow, None)
+        crate::merge::merge_with(Some(&target), false, crate::merge::FastForward::Allow, None, strategy)
     }
 }
 

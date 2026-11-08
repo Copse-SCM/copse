@@ -7,7 +7,7 @@
 //!   commits that touched those paths.
 
 use crate::cmd::{format_time, paint};
-use crate::objects::{decode_tree, short, Commit, Id, Kind, Mode, Store};
+use crate::objects::{short, Commit, Id};
 use crate::repo::Repo;
 use anyhow::Result;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -24,38 +24,20 @@ pub struct LogArgs<'a> {
     pub author: Option<&'a str>,
     pub grep: Option<&'a str>,
     pub paths: &'a [String],
-}
-
-/// The entry at `path` inside `tree` (a file or a whole folder), if any.
-fn entry_at(store: &Store, tree: &Id, path: &str) -> Result<Option<(Mode, Id)>> {
-    if path.is_empty() {
-        return Ok(Some((Mode::Dir, *tree)));
-    }
-    let mut current = *tree;
-    let mut parts = path.split('/').peekable();
-    while let Some(part) = parts.next() {
-        let entries = decode_tree(&store.get_kind(&current, Kind::Tree)?)?;
-        let Some(e) = entries.into_iter().find(|e| e.name == part) else { return Ok(None) };
-        if parts.peek().is_none() {
-            return Ok(Some((e.mode, e.id)));
-        }
-        if e.mode != Mode::Dir {
-            return Ok(None);
-        }
-        current = e.id;
-    }
-    Ok(None)
+    /// --format / --pretty
+    pub format: Option<crate::pretty::Format>,
+    pub date: crate::pretty::DateMode,
 }
 
 /// Whether a commit changed anything under `spec`. As in git, a merge counts only if
 /// it differs from every parent (otherwise the change belongs to the merged commits).
 fn touches(repo: &Repo, c: &Commit, spec: &str) -> Result<bool> {
-    let here = entry_at(&repo.store, &c.tree, spec)?;
+    let here = crate::objects::entry_at(&repo.store, &c.tree, spec)?;
     if c.parents.is_empty() {
         return Ok(here.is_some());
     }
     for p in &c.parents {
-        if entry_at(&repo.store, &repo.read_commit(p)?.tree, spec)? == here {
+        if crate::objects::entry_at(&repo.store, &repo.read_commit(p)?.tree, spec)? == here {
             return Ok(false);
         }
     }
@@ -250,6 +232,15 @@ pub fn log(args: LogArgs) -> Result<()> {
         println!("{}", paint("2", "(--graph is left out when filtering commits)"));
     }
 
+    let deco = crate::pretty::Decorations {
+        labels: labels.clone(),
+        head: repo.head_commit()?,
+        head_branch: match repo.head()? {
+            crate::repo::Head::Branch(b) => Some(b),
+            crate::repo::Head::Detached(_) => None,
+        },
+    };
+
     let mut shown = 0;
     for (id, c) in walk(&repo, &tips, args.first_parent, graph.is_some())? {
         if shown >= args.limit {
@@ -291,12 +282,31 @@ pub fn log(args: LogArgs) -> Result<()> {
         for line in before {
             println!("{}", line.trim_end());
         }
-        let deco = labels.get(&id).map(|n| paint("32", &format!(" ({})", n.join(", ")))).unwrap_or_default();
+        let labels_text = labels.get(&id).map(|n| paint("32", &format!(" ({})", n.join(", ")))).unwrap_or_default();
         let title = c.message.lines().next().unwrap_or_default();
-        if args.oneline {
-            println!("{row}{}{deco} {title}", paint("33", &short(&id)));
+        if let Some(format) = &args.format {
+            // A blank line between multi-line entries; format: (not tformat:) separates with a newline.
+            let custom_separator = matches!(format, crate::pretty::Format::Custom { terminator: false, .. });
+            if shown > 1 && (custom_separator || matches!(format, crate::pretty::Format::Named(_)) && !format.is_one_line()) {
+                println!("{}", rail.trim_end());
+            }
+            let text = crate::pretty::render(format, &id, &c, &deco, args.date);
+            let text = text.strip_suffix('\n').unwrap_or(&text);
+            let mut lines = text.split('\n');
+            let first = lines.next().unwrap_or_default();
+            let mut out = format!("{row}{first}");
+            for l in lines {
+                out += &format!("\n{rail}{l}");
+            }
+            if custom_separator {
+                print!("{out}");
+            } else {
+                println!("{out}");
+            }
+        } else if args.oneline {
+            println!("{row}{}{labels_text} {title}", paint("33", &short(&id)));
         } else {
-            println!("{row}{}{deco}  {}  {}", paint("33", &short(&id)), format_time(c.time()), c.author.name());
+            println!("{row}{}{labels_text}  {}  {}", paint("33", &short(&id)), format_time(c.time()), c.author.name());
             for line in c.message.lines() {
                 println!("{rail}    {line}");
             }
@@ -306,7 +316,17 @@ pub fn log(args: LogArgs) -> Result<()> {
             println!("{}", line.trim_end());
         }
         if args.patch || args.stat {
+            if matches!(&args.format, Some(crate::pretty::Format::Custom { terminator: false, .. })) {
+                println!();
+            }
             crate::diffs::commit_changes(&repo, &id, &specs, args.stat && !args.patch)?;
+            println!();
+        }
+    }
+    if shown > 0 && matches!(&args.format, Some(crate::pretty::Format::Custom { terminator: false, .. })) && !(args.patch || args.stat) {
+        // format: puts newlines only between entries; end the output tidily on a terminal.
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() {
             println!();
         }
     }

@@ -149,6 +149,8 @@ pub struct RebaseState {
     pub conflicts: Vec<String>,
     /// Files the stopped step created that the rebuilt branch doesn't have (removed on abort/skip).
     added: Vec<String>,
+    /// -X options, kept for --continue.
+    options: crate::merge::Options,
 }
 
 impl RebaseState {
@@ -177,6 +179,7 @@ impl RebaseState {
             total: 0,
             conflicts: vec![],
             added: vec![],
+            options: crate::merge::Options::default(),
         };
         // "<action> <id>", or just "<id>" (a pick) for state written by older versions.
         let step = |value: &str| -> Result<(Action, Id)> {
@@ -207,12 +210,15 @@ impl RebaseState {
                 "total" => s.total = value.parse()?,
                 "C" => s.conflicts.push(value.to_string()),
                 "A" => s.added.push(value.to_string()),
+                "options" => s.options = crate::merge::Options::from_words(value),
                 _ => {}
             }
         }
         if s.branch.is_empty() || s.orig == zero || s.current == zero {
             bail!("corrupt REBASE_STATE");
         }
+        // Carrying on keeps the -X options the operation started with.
+        crate::merge::set_options(s.options);
         Ok(Some(s))
     }
 
@@ -245,6 +251,10 @@ impl RebaseState {
         }
         for p in &self.added {
             t += &format!("A {p}\n");
+        }
+        let words = self.options.to_words();
+        if !words.is_empty() {
+            t += &format!("options {words}\n");
         }
         write_atomic(&Self::path(repo), t.as_bytes())
     }
@@ -392,6 +402,7 @@ pub fn replay(revs: &[String], op: Op, mainline: usize, cont: bool, skip: bool, 
         done: 0,
         conflicts: vec![],
         added: vec![],
+        options: crate::merge::options(),
     };
     state.save(&repo)?;
     let prep = if op == Op::Revert { "on" } else { "onto" };
@@ -501,6 +512,7 @@ fn start(repo: &Repo, args: &RebaseArgs) -> Result<()> {
         total,
         conflicts: vec![],
         added: vec![],
+        options: crate::merge::options(),
     };
     state.save(repo)?;
 
@@ -618,7 +630,7 @@ fn editor() -> String {
 
 /// Open `path` in the user's editor and wait for it to close. The editor setting may
 /// include arguments (e.g. "code --wait"), so it runs through the shell.
-fn run_editor(path: &Path) -> Result<()> {
+pub(crate) fn run_editor(path: &Path) -> Result<()> {
     let ed = editor();
     let status = std::process::Command::new("sh")
         .arg("-c")

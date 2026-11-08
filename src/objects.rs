@@ -681,6 +681,27 @@ fn write_dir(store: &Store, dir: &BTreeMap<String, Node>) -> Result<Id> {
 }
 
 /// Expand a tree into a flat, sorted map of `path -> (mode, blob id)`.
+/// The entry at `path` inside `tree` (a file or a whole folder), if any.
+pub fn entry_at(store: &Store, tree: &Id, path: &str) -> Result<Option<(Mode, Id)>> {
+    if path.is_empty() {
+        return Ok(Some((Mode::Dir, *tree)));
+    }
+    let mut current = *tree;
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        let entries = decode_tree(&store.get_kind(&current, Kind::Tree)?)?;
+        let Some(e) = entries.into_iter().find(|e| e.name == part) else { return Ok(None) };
+        if parts.peek().is_none() {
+            return Ok(Some((e.mode, e.id)));
+        }
+        if e.mode != Mode::Dir {
+            return Ok(None);
+        }
+        current = e.id;
+    }
+    Ok(None)
+}
+
 pub fn flatten(store: &Store, tree: &Id) -> Result<BTreeMap<String, (Mode, Id)>> {
     let mut out = BTreeMap::new();
     flatten_into(store, tree, "", &mut out)?;

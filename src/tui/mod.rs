@@ -98,8 +98,25 @@ struct App {
 struct HunkView {
     path: String,
     hunks: Vec<crate::hunks::Hunk>,
+    /// One per changed line of the file (removed and added lines, in order).
     take: Vec<bool>,
+    /// The selected hunk.
     sel: usize,
+    /// Picking single lines inside the selected hunk: which changed line.
+    line: Option<usize>,
+}
+
+impl HunkView {
+    fn hunk_state(&self, i: usize) -> &'static str {
+        let t = &self.take[self.hunks[i].changes.clone()];
+        if t.iter().all(|x| *x) {
+            "[x]"
+        } else if t.iter().any(|x| *x) {
+            "[~]"
+        } else {
+            "[ ]"
+        }
+    }
 }
 
 struct Job {
@@ -348,7 +365,7 @@ impl App {
                 args.push(format!("--pick=*:{p}"));
             }
             for (p, take) in &self.hunk_picks {
-                args.push(format!("--pick={}:{p}", take.iter().map(|t| if *t { '1' } else { '0' }).collect::<String>()));
+                args.push(format!("--pick=l{}:{p}", take.iter().map(|t| if *t { '1' } else { '0' }).collect::<String>()));
             }
         }
         if self.job.is_some() {
@@ -363,12 +380,13 @@ impl App {
     fn open_hunks(&mut self, path: &str) {
         match data::load_hunks(&self.repo, path) {
             Ok(Some(hunks)) => {
+                let total = crate::hunks::changed_lines(&hunks);
                 let take = match self.hunk_picks.get(path) {
-                    Some(t) if t.len() == hunks.len() => t.clone(),
-                    _ => vec![self.picked.contains(path); hunks.len()],
+                    Some(t) if t.len() == total => t.clone(),
+                    _ => vec![self.picked.contains(path); total],
                 };
-                self.message = format!("{}: {} change(s) — space picks one", path, hunks.len());
-                self.hunk_view = Some(HunkView { path: path.to_string(), hunks, take, sel: 0 });
+                self.message = format!("{}: {} change(s) — space picks one, l picks single lines", path, hunks.len());
+                self.hunk_view = Some(HunkView { path: path.to_string(), hunks, take, sel: 0, line: None });
             }
             Ok(None) => self.message = format!("{path} can only be committed whole: space picks it."),
             Err(e) => self.message = format!("Couldn't read {path}'s changes: {e}"),
@@ -381,26 +399,64 @@ impl App {
         self.picked.remove(&v.path);
         self.hunk_picks.remove(&v.path);
         let n = v.take.iter().filter(|t| **t).count();
-        if n == v.take.len() {
+        let total = v.take.len();
+        if n == total {
             self.picked.insert(v.path.clone());
         } else if n > 0 {
             self.hunk_picks.insert(v.path.clone(), v.take);
         }
         self.message = match n {
             0 => format!("Nothing picked in {}.", v.path),
-            n if n == v.hunks.len() => format!("Picked all of {}.", v.path),
-            n => format!("Picked {n} of {} change(s) in {}.", v.hunks.len(), v.path),
+            n if n == total => format!("Picked all of {}.", v.path),
+            n => format!("Picked {n} of {total} changed line(s) in {}.", v.path),
         };
     }
 
     fn hunk_key(&mut self, k: KeyEvent) {
         let Some(v) = self.hunk_view.as_mut() else { return };
+        // Inside a hunk: single lines.
+        if let Some(line) = v.line {
+            let range = v.hunks[v.sel].changes.clone();
+            match k.code {
+                KeyCode::Down | KeyCode::Char('j') => v.line = Some((line + 1).min(range.end - 1)),
+                KeyCode::Up | KeyCode::Char('k') => v.line = Some(line.saturating_sub(1).max(range.start)),
+                KeyCode::Char(' ') => {
+                    v.take[line] = !v.take[line];
+                    v.line = Some((line + 1).min(range.end - 1));
+                }
+                KeyCode::Char('a') => {
+                    let all = v.take[range.clone()].iter().all(|t| *t);
+                    v.take[range].iter_mut().for_each(|t| *t = !all);
+                }
+                KeyCode::Char('c') => {
+                    self.close_hunks();
+                    self.screen_key('c');
+                }
+                KeyCode::Enter => self.close_hunks(),
+                KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('q') => v.line = None,
+                _ => {}
+            }
+            return;
+        }
         match k.code {
             KeyCode::Down | KeyCode::Char('j') => v.sel = (v.sel + 1).min(v.hunks.len() - 1),
             KeyCode::Up | KeyCode::Char('k') => v.sel = v.sel.saturating_sub(1),
             KeyCode::Char(' ') => {
-                v.take[v.sel] = !v.take[v.sel];
+                let range = v.hunks[v.sel].changes.clone();
+                let all = v.take[range.clone()].iter().all(|t| *t);
+                v.take[range].iter_mut().for_each(|t| *t = !all);
                 v.sel = (v.sel + 1).min(v.hunks.len() - 1);
+            }
+            KeyCode::Char('l') | KeyCode::Right => v.line = Some(v.hunks[v.sel].changes.start),
+            KeyCode::Char('s') => {
+                if v.hunks[v.sel].can_split() {
+                    let parts = v.hunks[v.sel].split();
+                    let n = parts.len();
+                    v.hunks.splice(v.sel..=v.sel, parts);
+                    self.message = format!("Split into {n} changes.");
+                } else {
+                    self.message = "This change can't be split any smaller.".into();
+                }
             }
             KeyCode::Char('a') => {
                 let all = v.take.iter().all(|t| *t);
@@ -664,7 +720,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let hints = match app.tab {
-        _ if app.hunk_view.is_some() => "j/k move · space pick this change · a all/none · enter done · c commit",
+        _ if app.hunk_view.as_ref().is_some_and(|v| v.line.is_some()) => "j/k move · space pick this line · a all/none · h back to changes · enter done · c commit",
+        _ if app.hunk_view.is_some() => "j/k move · space pick · l single lines · s split · a all/none · enter done · c commit",
         Tab::Changes => "space pick · enter pick parts · a all · c commit · x discard · s stash",
         Tab::History => "enter/o check out · v revert · p cherry-pick · b branch here",
         Tab::Branches => "enter switch · n new · d delete · m merge",
@@ -732,7 +789,7 @@ fn draw(f: &mut Frame, app: &mut App) {
                         Move: j/k or arrows · g/G top/bottom · J/K or PgDn/PgUp scroll the right-hand pane\n\
                         Anywhere: F fetch · L pull · P push · r refresh · q quit\n\n\
                         Changes:  space pick a file (commit only picked ones) · a pick all/none\n          \
-                        enter pick some of a file's changes (space on each, enter when done)\n          \
+                        enter pick some of a file's changes: space on each, s split one, l pick single lines\n          \
                         c commit (summary, then tab for a description) · x discard a file's changes · s stash\n\
                         History:  enter/o check out · v revert · p cherry-pick · b make a branch here\n\
                         Branches: enter switch · n new branch · d delete · m merge into current\n\
@@ -755,16 +812,34 @@ fn draw_hunks(f: &mut Frame, v: &HunkView, area: Rect) {
             sel_at = lines.len();
             sel_end = sel_at + h.lines.len() + 1;
         }
-        let mark = if v.take[i] { "[x]" } else { "[ ]" };
+        let mark = v.hunk_state(i);
         let mut style = Style::default().fg(Color::Cyan);
-        if i == v.sel {
+        if i == v.sel && v.line.is_none() {
             style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
         }
-        lines.push(Line::styled(format!("{} {mark} {}  ({} of {})", if i == v.sel { "▶" } else { " " }, h.header, i + 1, v.hunks.len()), style));
-        lines.extend(h.lines.iter().map(|(m, l)| diff_line(&format!("{m}{l}"))));
+        lines.push(Line::styled(format!("{} {mark} {}  ({} of {})", if i == v.sel && v.line.is_none() { "▶" } else { " " }, h.header, i + 1, v.hunks.len()), style));
+        for l in &h.lines {
+            // Each changed line shows whether it's picked; unpicked ones are dimmed.
+            let (gutter, picked) = match l.change {
+                Some(c) => (if v.take[c] { "[x] " } else { "[ ] " }, v.take[c]),
+                None => ("    ", true),
+            };
+            let here = l.change.is_some() && l.change == v.line && i == v.sel;
+            let mut line = diff_line(&format!("{}{}", l.mark, l.text));
+            if !picked {
+                line = line.style(Style::default().fg(Color::DarkGray));
+            }
+            let mut spans = vec![Span::raw(format!("{}{gutter}", if here { "▸" } else { " " }))];
+            spans.extend(line.spans.into_iter().map(|sp| sp.patch_style(line.style)));
+            let mut row = Line::from(spans);
+            if here {
+                row = row.style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+            }
+            lines.push(row);
+        }
         lines.push(Line::raw(""));
     }
-    let picked = v.take.iter().filter(|t| **t).count();
+    let picked = v.hunks.iter().enumerate().filter(|(i, _)| v.hunk_state(*i) != "[ ]").count();
     let title = format!(" {}: {picked} of {} change(s) picked ", v.path, v.hunks.len());
     // Scroll only as far as it takes to show the selected change.
     let visible = area.height.saturating_sub(2) as usize;
