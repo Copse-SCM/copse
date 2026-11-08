@@ -241,8 +241,15 @@ impl Store {
             bail!("received a delta where a full object was expected");
         }
         let data = zstd::stream::decode_all(rest).context("received a corrupt object")?;
-        if Self::hash(Kind::from_u8(kind)?, &data) != *id {
+        let kind = Kind::from_u8(kind)?;
+        if Self::hash(kind, &data) != *id {
             bail!("received object {} does not match its id", short(id));
+        }
+        // A folder listing is checked before it's kept: names like ".." or ".copse",
+        // or a name listed twice, are refused here, so a hostile push can't plant one
+        // in a shared repository (checkouts refuse them too, but it shouldn't get in).
+        if kind == Kind::Tree {
+            decode_tree(&data).with_context(|| format!("received folder listing {} refused", short(id)))?;
         }
         Ok(())
     }

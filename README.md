@@ -426,6 +426,7 @@ Cloning or pulling someone else's repository is safe from the tricks git itself 
   - `.copse` or `.git` in any disguise a filesystem would accept: other capitals (`.COPSE`), trailing dots or spaces (`.git.`), Windows short names (`GIT~1`), or invisible characters macOS ignores.
 
   A hostile repository can't make a checkout write outside your project or over copse's data. A folder that lists the same name twice is refused too.
+- **They're checked on arrival, too.** Every folder listing received over copse's protocol (a push into a shared repository, a fetch, a partial clone's downloads) is checked before it's stored. A hostile push is refused outright rather than planted for someone else to trip over.
 - **Checkouts never write through a symlink.** If a folder on the way to a file is a link, the write is refused rather than following it.
 - **Addresses can't smuggle in options.** An SSH address whose host starts with `-` (like `-oProxyCommand=…`) is refused before ssh is started, and so is a submodule URL starting with `-`.
 

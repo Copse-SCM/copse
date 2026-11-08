@@ -768,3 +768,66 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
     w.flush()?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::read_pack;
+    use crate::objects::{encode_tree, full_entry, Id, Kind, Mode, Store, TreeEntry};
+
+    /// A transfer in copse's format: frames of id | length | raw object, then 32 zero bytes.
+    fn transfer(objects: &[(Kind, Vec<u8>)]) -> (Vec<u8>, Vec<Id>) {
+        let mut out = Vec::new();
+        let mut ids = Vec::new();
+        for (kind, data) in objects {
+            let id = Store::hash(*kind, data);
+            let raw = full_entry(*kind, data).unwrap();
+            out.extend_from_slice(id.as_bytes());
+            out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            out.extend_from_slice(&raw);
+            ids.push(id);
+        }
+        out.extend_from_slice(&[0u8; 32]);
+        (out, ids)
+    }
+
+    fn temp_store(tag: &str) -> (std::path::PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("copse-recv-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for i in 0..256u32 {
+            std::fs::create_dir_all(dir.join(format!("{i:02x}"))).unwrap(); // as `copse init` makes them
+        }
+        (dir.clone(), Store::new(dir))
+    }
+
+    #[test]
+    fn hostile_folder_listings_are_refused_on_arrival() {
+        let blob = b"pwned\n".to_vec();
+        let blob_id = Store::hash(Kind::Blob, &blob);
+        let hostile = [
+            vec![TreeEntry { name: "..".into(), mode: Mode::File, id: blob_id }],
+            vec![TreeEntry { name: ".COPSE".into(), mode: Mode::Dir, id: blob_id }],
+            vec![TreeEntry { name: "x".into(), mode: Mode::Link, id: blob_id }, TreeEntry { name: "x".into(), mode: Mode::Dir, id: blob_id }],
+        ];
+        for (n, entries) in hostile.iter().enumerate() {
+            let tree = encode_tree(entries);
+            let (bytes, ids) = transfer(&[(Kind::Blob, blob.clone()), (Kind::Tree, tree)]);
+            let (dir, store) = temp_store(&format!("bad{n}"));
+            let err = read_pack(&mut bytes.as_slice(), &store).expect_err("a hostile folder listing must be refused");
+            assert!(format!("{err:#}").contains("refused"), "wrong error: {err:#}");
+            assert!(!store.contains(&ids[1]), "the hostile listing must not be stored");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn ordinary_folder_listings_still_arrive() {
+        let blob = b"fine\n".to_vec();
+        let blob_id = Store::hash(Kind::Blob, &blob);
+        let tree = encode_tree(&[TreeEntry { name: ".gitignore".into(), mode: Mode::File, id: blob_id }, TreeEntry { name: "src".into(), mode: Mode::File, id: blob_id }]);
+        let (bytes, ids) = transfer(&[(Kind::Blob, blob), (Kind::Tree, tree)]);
+        let (dir, store) = temp_store("good");
+        read_pack(&mut bytes.as_slice(), &store).unwrap();
+        assert!(ids.iter().all(|id| store.contains(id)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
