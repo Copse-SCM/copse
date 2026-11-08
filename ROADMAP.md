@@ -116,7 +116,7 @@ Work through the remaining gaps in batches, testing each against real git wherev
 8. ✅ **Security:** file and folder names checked as git checks them (no `..`, no `.copse`/`.git` in any disguise, no repeated names), never writing through a symlink, no option injection through ssh hosts or submodule URLs; `tests/security.sh` attacks with hand-crafted repositories
 9. ✅ **Hardening:** rename detection in merges; randomized stress tests against git (`tests/fuzz.py`: 2,000 rounds across eight seeds match git exactly, folder moves included); signed commits checked on github.com; fast-forward pulls that touch only changed files (now faster than git); signed tags; signing that follows git's settings
 
-**Self-hosting (2026-11-07):** copse now versions its own source with copse, pushed to the private repository Copse-SCM/copse on GitHub. A fresh git clone of it builds from scratch and passes the tests.
+**Self-hosting (2026-11-07):** copse now versions its own source with copse, pushed to Copse-SCM/copse on GitHub (public since 2026-11-08, with secret scanning and push protection, CodeQL, Dependabot, private vulnerability reporting, and `main` protected from force-pushes and deletion). A fresh git clone of it builds from scratch and passes the tests.
 
 Before relying on copse for real work: weeks of use on a backed-up project (this one, now). Still open: Windows, pushing to github.com over SSH, LFS against GitHub's server.
 

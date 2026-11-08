@@ -18,8 +18,6 @@ cargo install --git https://github.com/Copse-SCM/copse     # or, from a checkout
 cargo build --release                                      # binary at target/release/copse
 ```
 
-The repository is private for now, so `cargo install --git` needs access to it. Set `CARGO_NET_GIT_FETCH_WITH_CLI=true` so cargo signs in the way git does.
-
 ## A quick tour
 
 ```bash
