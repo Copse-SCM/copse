@@ -688,7 +688,8 @@ impl App {
                 };
                 match c {
                     '\n' | 's' => {
-                        let target = if b.remote { b.name.clone() } else { b.name.clone() };
+                        // A remote branch (origin/x): switching makes a local x from it, as git does.
+                        let target = if b.remote { b.name.split_once('/').map_or(b.name.clone(), |(_, short)| short.to_string()) } else { b.name.clone() };
                         self.mode = Mode::Confirm { question: format!("Switch to {}?", b.name), then: Pending::Run(vec!["checkout".into(), target]) }
                     }
                     'n' => self.mode = Mode::Input { prompt: "New branch (from where you are): name".into(), text: String::new(), then: Pending::NewBranch { at: None } },

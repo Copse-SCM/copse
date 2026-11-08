@@ -424,6 +424,9 @@ pub fn checkout(target: &str, force: bool) -> Result<()> {
     }
     let mut index = Index::load(&repo.wt)?;
 
+    // A branch only a remote has (origin/NAME): as with git, `checkout NAME` makes a
+    // local branch there and switches to it. Made only once the checkout goes ahead.
+    let mut from_remote: Option<String> = None;
     let (new_head, commit_id) = match repo.branch(target)? {
         Some(id) => {
             if let Some(other) = crate::worktrees::checked_out_elsewhere(&repo, target)? {
@@ -431,10 +434,26 @@ pub fn checkout(target: &str, force: bool) -> Result<()> {
             }
             (Head::Branch(target.to_string()), id)
         }
-        None => {
-            let id = repo.resolve(target)?;
-            (Head::Detached(id), id)
-        }
+        None => match repo.resolve(target) {
+            Ok(id) => (Head::Detached(id), id),
+            Err(e) => {
+                let on_remotes: Vec<(String, Id)> =
+                    repo.tracking_refs()?.into_iter().filter(|(full, _)| full.split_once('/').map(|(_, b)| b) == Some(target)).collect();
+                match on_remotes.as_slice() {
+                    [] => return Err(e),
+                    [(full, id)] => {
+                        crate::repo::validate_branch(target)?;
+                        from_remote = Some(full.clone());
+                        (Head::Branch(target.to_string()), *id)
+                    }
+                    several => bail!(
+                        "{target} is a branch on more than one remote ({}); say which, e.g. `copse checkout {}`",
+                        several.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>().join(", "),
+                        several[0].0
+                    ),
+                }
+            }
+        },
     };
 
     let files = snapshot(&repo.root, &index, None)?;
@@ -452,6 +471,11 @@ pub fn checkout(target: &str, force: bool) -> Result<()> {
     let old_commit = repo.head_commit()?;
     let (written, removed) = apply_tree(&repo, &mut index, &files, &target_files, &merge_added)?;
     index.save(&repo.wt)?;
+    if let Some(full) = &from_remote {
+        crate::reflog::set_reason(format!("branch: created from {full}"));
+        repo.set_branch(target, &commit_id)?;
+        println!("Made branch {target} from {full} (push and pull use it)");
+    }
     repo.set_head(&new_head)?;
     MergeState::clear(&repo)?;
     let zero = "0".repeat(64);

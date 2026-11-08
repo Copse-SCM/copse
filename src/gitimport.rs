@@ -55,6 +55,9 @@ pub fn fetch(repo: &Repo, url: &str, depth: crate::remote::Depth) -> Result<Remo
     // A shallow fetch takes branches only; tags come along if they name history that
     // arrived (include-tag), as git does.
     let shallow_mode = matches!(depth, Depth::Last(_)) || (!shallow_now.is_empty() && depth != Depth::Unshallow);
+    if caps.contains("dumb") && (deepen.is_some() || !shallow_git.is_empty() || repo.is_partial()) {
+        bail!("this git server only serves plain files (the \"dumb\" protocol), which has no shallow or partial clones; clone without --depth or --filter");
+    }
     if (deepen.is_some() || !shallow_git.is_empty()) && !caps.contains("shallow") {
         bail!("this git server doesn't support shallow clones; clone without --depth");
     }
@@ -341,52 +344,71 @@ pub fn fetch_blobs(store: &Store, url: &str, ids: &[Id]) -> Result<()> {
 fn dumb_objects(h: &mut crate::githttp::Http, wants: &[GitId], have: impl Fn(&GitId) -> bool) -> Result<HashMap<GitId, (u8, Arc<Vec<u8>>)>> {
     let mut objects: HashMap<GitId, (u8, Arc<Vec<u8>>)> = HashMap::new();
     let mut packs: Option<Vec<(String, HashSet<GitId>)>> = None; // not downloaded yet: name, ids
-    let mut queue: Vec<GitId> = wants.to_vec();
+    let mut frontier: Vec<GitId> = wants.to_vec();
     let mut walked = HashSet::new();
-    while let Some(g) = queue.pop() {
-        if have(&g) || !walked.insert(g) {
-            continue;
+    // Level by level: everything one round of the walk needs is fetched at once.
+    while !frontier.is_empty() {
+        let mut level: Vec<GitId> = Vec::new();
+        for g in frontier.drain(..) {
+            if !have(&g) && walked.insert(g) {
+                level.push(g);
+            }
         }
-        if !objects.contains_key(&g) {
-            let x = hex(&g);
-            if let Some(z) = h.get_maybe(&format!("objects/{}/{}", &x[..2], &x[2..]))? {
-                let (kind, data) = loose_object(&z).with_context(|| format!("object {x} from the server"))?;
-                if git_hash(type_name(kind)?, &data) != g {
-                    bail!("object {x} from the server doesn't match its id");
-                }
-                objects.insert(g, (kind, Arc::new(data)));
-            } else {
-                // Not loose: find the pack that has it.
-                if packs.is_none() {
-                    let list = h.get_maybe("objects/info/packs")?.unwrap_or_default();
-                    let mut found = Vec::new();
-                    for line in String::from_utf8_lossy(&list).lines() {
-                        if let Some(name) = line.strip_prefix("P ").map(str::trim).and_then(|n| n.strip_suffix(".pack")) {
-                            let idx = h.get_maybe(&format!("objects/pack/{name}.idx"))?.with_context(|| format!("the server lists {name}.pack but has no index for it"))?;
-                            found.push((name.to_string(), pack_index_ids(&idx)?));
-                        }
+        let need: Vec<GitId> = level.iter().copied().filter(|g| !objects.contains_key(g)).collect();
+        let paths: Vec<String> = need.iter().map(|g| { let x = hex(g); format!("objects/{}/{}", &x[..2], &x[2..]) }).collect();
+        let mut not_loose = Vec::new();
+        for (g, body) in need.iter().zip(h.get_many(&paths)?) {
+            let x = hex(g);
+            match body {
+                Some(z) => {
+                    let (kind, data) = loose_object(&z).with_context(|| format!("object {x} from the server"))?;
+                    if git_hash(type_name(kind)?, &data) != *g {
+                        bail!("object {x} from the server doesn't match its id");
                     }
-                    packs = Some(found);
+                    objects.insert(*g, (kind, Arc::new(data)));
                 }
-                let list = packs.as_mut().unwrap();
-                let at = list.iter().position(|(_, ids)| ids.contains(&g)).with_context(|| format!("the server is missing object {x}"))?;
-                let (name, _) = list.remove(at);
-                let pack = h.get_maybe(&format!("objects/pack/{name}.pack"))?.with_context(|| format!("the server is missing {name}.pack"))?;
-                let (from_pack, _) = read_pack(&pack)?;
-                objects.extend(from_pack);
+                None => not_loose.push(*g),
             }
         }
-        // What it leads to.
-        let (kind, data) = objects.get(&g).map(|(k, d)| (*k, d.clone())).context("internal error: object vanished")?;
-        match kind {
-            1 => {
-                let c = parse_commit(&data, &g)?;
-                queue.push(c.tree);
-                queue.extend(c.parents);
+        for g in not_loose {
+            if objects.contains_key(&g) {
+                continue; // in a pack fetched for an earlier one
             }
-            2 => queue.extend(parse_tree(&data)?.into_iter().filter(|(mode, _, _)| mode.as_slice() != b"160000").map(|(_, _, id)| id)),
-            4 => queue.push(parse_tag(&data, &g)?.object),
-            _ => {}
+            // Not loose: find the pack that has it.
+            if packs.is_none() {
+                let list = h.get_maybe("objects/info/packs")?.unwrap_or_default();
+                let names: Vec<String> = String::from_utf8_lossy(&list)
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("P ").map(str::trim).and_then(|n| n.strip_suffix(".pack")).map(str::to_string))
+                    .collect();
+                let idx_paths: Vec<String> = names.iter().map(|n| format!("objects/pack/{n}.idx")).collect();
+                let mut found = Vec::new();
+                for (name, idx) in names.into_iter().zip(h.get_many(&idx_paths)?) {
+                    let idx = idx.with_context(|| format!("the server lists {name}.pack but has no index for it"))?;
+                    found.push((name, pack_index_ids(&idx)?));
+                }
+                packs = Some(found);
+            }
+            let list = packs.as_mut().unwrap();
+            let at = list.iter().position(|(_, ids)| ids.contains(&g)).with_context(|| format!("the server is missing object {}", hex(&g)))?;
+            let (name, _) = list.remove(at);
+            let pack = h.get_maybe(&format!("objects/pack/{name}.pack"))?.with_context(|| format!("the server is missing {name}.pack"))?;
+            let (from_pack, _) = read_pack(&pack)?;
+            objects.extend(from_pack);
+        }
+        // What this level leads to.
+        for g in level {
+            let (kind, data) = objects.get(&g).map(|(k, d)| (*k, d.clone())).context("internal error: object vanished")?;
+            match kind {
+                1 => {
+                    let c = parse_commit(&data, &g)?;
+                    frontier.push(c.tree);
+                    frontier.extend(c.parents);
+                }
+                2 => frontier.extend(parse_tree(&data)?.into_iter().filter(|(mode, _, _)| mode.as_slice() != b"160000").map(|(_, _, id)| id)),
+                4 => frontier.push(parse_tag(&data, &g)?.object),
+                _ => {}
+            }
         }
     }
     // Only what the walk reached (a pack may hold more).

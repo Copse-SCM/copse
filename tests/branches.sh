@@ -106,6 +106,11 @@ cd "$WORK" && cps init --bare slashhub.copse >/dev/null && cd slashes && cps rem
 cps push origin users/me/login | has "Pushed users/me/login" && ok "push a slashed branch to a copse remote" || fail "line $LINENO: a step before this check failed"
 cd "$WORK" && cps clone slashhub.copse slashclone >/dev/null && cd slashclone
 cps checkout origin/users/me/login >/dev/null && [[ -f login.txt ]] && ok "a clone sees origin/users/me/login and can check it out" || fail "line $LINENO: a step before this check failed"
+(cd ../slashes && cps branch team/extra users/me/login >/dev/null && cps push origin team/extra >/dev/null) && cps fetch >/dev/null
+out=$(cps checkout team/extra) && [[ "$out" == *"Made branch team/extra from origin/team/extra"* ]] && same "$(cps status | head -1)" "On branch team/extra" "checkout NAME of a branch only the remote has makes a local branch from it, as git does" || fail "${out:-line $LINENO}"
+echo more > more.txt && cps commit -m "from the clone" >/dev/null && cps push | has "Pushed team/extra to origin" && ok "and pushing from it goes to the same branch on the remote" || fail "line $LINENO: a step before this check failed"
+expect_fail "a name that's nowhere is still an unknown revision" "unknown revision" cps checkout no/such/branch
+cps checkout users/me/login >/dev/null 2>&1 || true
 cps checkout main >/dev/null 2>&1 || cps checkout -f main >/dev/null 2>&1 || true
 cd ../slashes && cps push origin --delete users/me/login | has "Deleted branch users/me/login" && ok "delete a slashed branch on a copse remote" || fail "line $LINENO: a step before this check failed"
 cd ../slashclone && cps fetch | has "origin/users/me/login  deleted on the server" && ok "and fetch tidies it away" || fail "line $LINENO: a step before this check failed"

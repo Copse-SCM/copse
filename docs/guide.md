@@ -27,6 +27,7 @@ Everything copse does, command by command. For a quick start, see the [README](.
 - [Benchmark](#benchmark)
 - [Plumbing for scripts](#plumbing-for-scripts)
 - [Releases and nightly builds](#releases-and-nightly-builds)
+- [Checking real hosts](#checking-real-hosts)
 - [How it's tested](#how-its-tested)
 - [Not built yet](#not-built-yet)
 
@@ -104,7 +105,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse rebase --autosquash <rev>` | Fold `fixup! X` and `squash! X` commits into commit X |
 | `copse rebase -x <cmd> <rev>` | Run a command after each commit (e.g. the tests); if it fails, the rebase pauses there so you can fix it |
 | `copse rebase --continue` / `--skip` / `--abort` | Carry on after fixing conflicts, drop the conflicting commit, or undo the whole rebase |
-| `copse checkout <rev>` (`co`) | Switch to a branch, a commit id prefix, `origin/main`, or `HEAD~N`. Refuses if you have uncommitted changes; `-f` discards them, but untracked files are always kept. |
+| `copse checkout <rev>` (`co`) | Switch to a branch, a commit id prefix, `origin/main`, or `HEAD~N`. A branch only the remote has (`origin/feature`) can be checked out as `feature`: copse makes the local branch from it, as git does. Refuses if you have uncommitted changes; `-f` discards them, but untracked files are always kept. |
 | `copse gc [--prune when]` | Pack all objects into one file (older versions as compact deltas) and remove unused objects once they're two weeks old |
 | `copse fsck` | Check that every object is intact and that everything branches, tags, stashes and the reflog need is there |
 | `copse clone <url> [dir] [--depth N] [--filter=blob:none] [--recurse-submodules]` | Copy a repository and check out its main branch. `--depth N` fetches only the newest N commits; `--filter=blob:none` fetches file contents only when needed (both copse remotes); `--recurse-submodules` checks submodules out too |
@@ -543,13 +544,27 @@ Every command that takes a revision understands git's names: a branch, `origin/m
 - **Homebrew:** the tap is [Copse-SCM/homebrew-copse](https://github.com/Copse-SCM/homebrew-copse), with `copse` (the latest release; `--HEAD` builds main from source) and `copse-nightly` (the latest daily build). Both provide the `copse` command, so they conflict with each other. After publishing, the release workflow rewrites `copse` and the nightly workflow rewrites `copse-nightly` with `packaging/homebrew/render.py` (version, download addresses and checksums from the release's `SHA256SUMS`). Both need a `HOMEBREW_TAP_TOKEN` secret: a fine-grained token for the tap repository only, with "Contents: read and write". The tap's README is kept in `packaging/homebrew/tap/`.
 - Both share `.github/workflows/build.yml`. A build's version comes from `COPSE_BUILD` at compile time; without it, `copse version` shows `Cargo.toml`'s.
 
+## Checking real hosts
+
+`tests/hosted/check.sh URL` runs copse against a real git host, with git as the judge: cloning, history, fsck, shallow and partial clones, then (unless `--read-only`) pushing files of every kind, working alongside a git user through fast-forwards, merges, conflicts and `pull --rebase`, branches, tags, force pushes, and Git LFS. It only touches branches named `copse-check/*` and tags named `copse-check-*`, and deletes them afterwards. It isn't part of `run-all.sh`, since it needs the network and a login.
+
+Results (2026-11-08):
+
+| Host | Kind | Result |
+|---|---|---|
+| github.com | GitHub | in daily use: copse pushes itself there; shallow and partial clones of public repositories checked |
+| gitlab.com | GitLab | all 28 checks, LFS included, on a private project |
+| git.symlinx.net | cgit (dumb HTTP) | 6 repositories, read-only: identical files and history; shallow and partial clones correctly refused |
+
+These found three things, now fixed: checking out a branch only the remote has, a clearer message when a dumb server is asked for a shallow clone, and dumb-protocol clones fetching one object at a time (now eight at once: 45 seconds instead of 3 minutes 20 for a 1,500-object repository; git takes 35).
+
 ## How it's tested
 
 Every suite builds real repositories in a fresh folder and checks what copse does, usually against git doing the same thing (git is the oracle). `tests/run-all.sh` runs them all and summarizes (`--update-docs` writes the counts below and the README's total, so they're never typed by hand; CI checks them with `--check-docs`); CI runs it, plus `cargo test` and 150 stress-test rounds, on macOS and Linux for every push. The scripts work with both macOS and Linux tools, through `tests/portable.sh`. Build with `cargo build --release` first.
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `branches.sh` | 51 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
+| `branches.sh` | 54 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
 | `bridge.sh` | 42 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
 | `commit.sh` | 59 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |

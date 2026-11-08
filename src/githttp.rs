@@ -44,6 +44,7 @@ impl Http {
             .user_agent(&user_agent())
             .timeout_connect(Duration::from_secs(30))
             .redirects(5)
+            .max_idle_connections_per_host(16) // dumb servers: many small requests at once
             .try_proxy_from_env(true)
             .build();
         let (base, auth) = split_userinfo(url.trim_end_matches('/'));
@@ -117,6 +118,40 @@ impl Http {
             Err(e) if e.to_string().contains("(404)") => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Several files from a "dumb" server at once (None for each that isn't there).
+    /// The first goes through the normal sign-in; the rest reuse that login, in parallel.
+    pub fn get_many(&mut self, paths: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        use rayon::prelude::*;
+        let Some((first, rest)) = paths.split_first() else { return Ok(Vec::new()) };
+        let mut out = vec![self.get_maybe(first)?];
+        let header = self.auth.as_ref().map(|c| format!("Basic {}", base64(format!("{}:{}", c.username, c.password).as_bytes())));
+        let (agent, base) = (self.agent.clone(), self.base.clone());
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build()?;
+        let fetched: Vec<Result<Option<Vec<u8>>>> = pool.install(|| {
+            rest.par_iter()
+                .map(|p| {
+                    let mut req = agent.get(&format!("{base}/{p}"));
+                    if let Some(h) = &header {
+                        req = req.set("Authorization", h);
+                    }
+                    match req.call() {
+                        Ok(resp) => {
+                            let mut body = Vec::new();
+                            resp.into_reader().take(4 << 30).read_to_end(&mut body)?;
+                            Ok(Some(body))
+                        }
+                        Err(ureq::Error::Status(404, _)) => Ok(None),
+                        Err(e) => Err(anyhow!("couldn't fetch {p} from {}: {e}", redact(&base))),
+                    }
+                })
+                .collect()
+        });
+        for f in fetched {
+            out.push(f?);
+        }
+        Ok(out)
     }
 
     /// Send a whole request (wants and haves, or commands and a pack) and return
