@@ -1,2 +1,5 @@
 target/
 .DS_Store
+
+# Private notes, kept off GitHub
+CODEX-HANDOFF.md
