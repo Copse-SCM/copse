@@ -92,8 +92,24 @@ pub fn restore(paths: &[String], from: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    // Files with uncommitted edits that are about to be overwritten: keep a copy first.
-    let edited: BTreeSet<&str> = ch.modified.iter().map(String::as_str).collect();
+    // A backup only contains files included in the snapshot. Never overwrite an
+    // existing path it missed (for example, an ignored file), even if another
+    // requested path would have triggered a backup.
+    for path in to_write.keys() {
+        match std::fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)) {
+            Ok(_) if !current.contains_key(path.as_str()) => {
+                bail!("refusing to overwrite {path}: it was not included in the backup scan (it may be ignored); move it aside first");
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("checking {path} before restoring"));
+            }
+            _ => {}
+        }
+    }
+
+    // Both edits and new files can collide with paths from an older revision.
+    // Save their current contents before writing any of the requested files.
+    let edited: BTreeSet<&str> = ch.modified.iter().chain(&ch.added).map(String::as_str).collect();
     if to_write.keys().any(|p| edited.contains(p.as_str())) {
         crate::stash::backup(&repo, &format!("before restoring {} from {rev}", paths.join(" ")))?;
     }

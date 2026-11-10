@@ -108,6 +108,14 @@ cd c2 && cps pull 2>&1 | has "Downloaded 1 LFS file(s)" && cmp -s other.bin ../o
 rm -rf "$WORK/c2/.copse/lfs/objects" && printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize 5000\n' "$goid" > other.bin
 same "$(cps status | tail -1)" "Nothing changed." "a file left as its pointer (contents not downloaded) isn't a change"
 cps lfs pull | has "Downloaded 2 LFS file(s); wrote 1 into your files" && cmp -s other.bin ../other.orig && ok "lfs pull downloads and writes what's missing" || fail "line $LINENO: a step before this check failed"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize 5000\n' "$goid" > ../outside-pointer
+cp ../outside-pointer ../expected-pointer
+rm other.bin && ln -s ../outside-pointer other.bin
+expect_fail "lfs pull refuses a file symlink" "without following symlinks" cps lfs pull
+[[ -L other.bin ]] && cmp -s ../outside-pointer ../expected-pointer && ok "lfs pull leaves the symlink and outside contents untouched" || fail "LFS followed a symlink"
+rm other.bin && ln -s ../missing-outside other.bin
+expect_fail "lfs pull refuses a dangling symlink" "without following symlinks" cps lfs pull
+[[ -L other.bin && ! -e ../missing-outside ]] && ok "lfs pull does not create a dangling symlink's outside target" || fail "LFS created an outside target"
 cd ..
 mkdir broken && cd broken && cps init >/dev/null && cps lfs track "*.bin" >/dev/null && echo x > x.bin && cps commit -m x >/dev/null
 cps remote add origin "$WORK/srv/proj.git" >/dev/null

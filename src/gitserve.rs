@@ -360,6 +360,7 @@ pub struct RefResult {
 /// The reply to `POST git-receive-pack`, and what happened to each ref.
 /// `allow` is asked about every change before it's made: an error refuses it
 /// (and its message reaches the person pushing).
+/// Unknown old object ids and deletions of missing refs are refused before `allow`.
 pub fn receive_pack(repo: &Repo, mut body: &[u8], allow: &mut dyn FnMut(&RefChange) -> Result<(), String>) -> Result<(Vec<u8>, Vec<RefResult>)> {
     let mut commands: Vec<(GitId, GitId, String)> = Vec::new();
     let mut caps = HashSet::new();
@@ -460,9 +461,12 @@ fn apply(repo: &Repo, map: &GitMap, old: GitId, new: GitId, refname: &str, allow
     let new_id = lookup(new)?;
     let current = if is_tag { repo.tag(&name) } else { repo.branch(&name) }.map_err(|e| (None, format!("{e:#}")))?;
     // The client's idea of where the ref is must match ours.
-    let old_id = if old == NO_ID { None } else { map.copse(&old) };
+    let old_id = lookup(old)?;
     if old_id != current {
         return Err((None, if current.is_some() && old == NO_ID { "already exists".into() } else { "stale info: it changed since you fetched; fetch and try again".into() }));
+    }
+    if current.is_none() && new_id.is_none() {
+        return Err((None, "this ref does not exist, so it can't be deleted".into()));
     }
     if let Some(id) = new_id {
         let kind = repo.store.get(&id).map(|(k, _)| k).map_err(|e| (None, format!("{e:#}")))?;
@@ -479,16 +483,17 @@ fn apply(repo: &Repo, map: &GitMap, old: GitId, new: GitId, refname: &str, allow
     if let Err(why) = allow(&change) {
         return Err((Some(change), why));
     }
-    let done = match (new_id, is_tag) {
-        (None, false) => {
+    let done = match (current, new_id, is_tag) {
+        (Some(old), None, false) => {
             if matches!(repo.head(), Ok(Head::Branch(b)) if b == name) {
                 return Err((Some(change), "this is the repository's main branch, so it can't be deleted".into()));
             }
-            repo.cas_delete_branch(&name, &current.expect("deleting a branch that exists"))
+            repo.cas_delete_branch(&name, &old)
         }
-        (Some(n), false) => repo.cas_branch(&name, current, &n),
-        (None, true) => repo.delete_tag(&name).map(|_| ()),
-        (Some(n), true) => repo.set_tag(&name, &n),
+        (_, Some(n), false) => repo.cas_branch(&name, current, &n),
+        (Some(_), None, true) => repo.delete_tag(&name).map(|_| ()),
+        (_, Some(n), true) => repo.set_tag(&name, &n),
+        (None, None, _) => Err(anyhow::anyhow!("this ref does not exist, so it can't be deleted")),
     };
     match done {
         Ok(()) => Ok(change),
@@ -499,6 +504,73 @@ fn apply(repo: &Repo, map: &GitMap, old: GitId, new: GitId, refname: &str, allow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(old: GitId, new: GitId, name: &str) -> Vec<u8> {
+        let mut body = pkt(format!("{} {} {name}\0report-status", hex(&old), hex(&new)).as_bytes());
+        body.extend_from_slice(FLUSH);
+        body
+    }
+
+    #[test]
+    fn malformed_deletions_do_not_panic_or_poison_the_repository_lock() {
+        for (name, old) in [("unknown-old", [7; 20]), ("zero-old", NO_ID)] {
+            let dir = std::env::temp_dir().join(format!("copse-delete-{name}-{}", std::process::id()));
+            let repo = std::sync::Mutex::new(Repo::init_bare(&dir).unwrap());
+            let body = request(old, NO_ID, "refs/heads/missing");
+            let mut allowed = 0;
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let guard = repo.lock().unwrap();
+                receive_pack(&guard, &body, &mut |_| { allowed += 1; Ok(()) })
+            }));
+            assert!(outcome.is_ok(), "{name}: malformed deletion panicked");
+            assert!(!repo.is_poisoned(), "{name}: repository lock was poisoned");
+            let (reply, _) = outcome.unwrap().unwrap();
+            assert!(String::from_utf8_lossy(&reply).contains("ng refs/heads/missing "));
+            assert_eq!(allowed, 0, "invalid changes must be rejected before the callback");
+            let guard = repo.lock().unwrap();
+            assert!(guard.branches().unwrap().is_empty());
+            assert!(guard.tags().unwrap().is_empty());
+            assert!(info_refs(&guard, Service::UploadPack).is_ok(), "the next fetch must still work");
+            drop(guard);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn ref_changes_require_matching_old_ids_and_existing_deletion_targets() {
+        let dir = std::env::temp_dir().join(format!("copse-ref-check-{}", std::process::id()));
+        let repo = Repo::init_bare(&dir).unwrap();
+        let tree = repo.store.put(Kind::Tree, &crate::objects::encode_tree(&[])).unwrap();
+        let id = repo.store.put(Kind::Commit, &crate::objects::Commit::new(tree, vec![], "one".into()).encode()).unwrap();
+        repo.set_branch("main", &id).unwrap();
+        info_refs(&repo, Service::ReceivePack).unwrap();
+        let git = GitMap::load(&repo).unwrap().git(&id).unwrap();
+        for (old, new, name) in [
+            ([7; 20], git, "refs/heads/side"),
+            (git, NO_ID, "refs/heads/missing"),
+            (NO_ID, NO_ID, "refs/tags/missing"),
+            (git, NO_ID, "refs/heads/main"),
+        ] {
+            let (reply, _) = receive_pack(&repo, &request(old, new, name), &mut |_| Ok(())).unwrap();
+            assert!(String::from_utf8_lossy(&reply).contains(&format!("ng {name} ")), "invalid change was accepted: {name}");
+        }
+        assert_eq!(repo.branch("main").unwrap(), Some(id));
+        assert_eq!(repo.branch("side").unwrap(), None);
+        for (old, new, name) in [
+            (NO_ID, git, "refs/heads/side"),
+            (git, NO_ID, "refs/heads/side"),
+            (NO_ID, git, "refs/tags/v1"),
+            (git, NO_ID, "refs/tags/v1"),
+        ] {
+            let (reply, results) = receive_pack(&repo, &request(old, new, name), &mut |_| Ok(())).unwrap();
+            assert!(String::from_utf8_lossy(&reply).contains(&format!("ok {name}\n")));
+            assert_eq!(results.len(), 1);
+            assert!(results[0].error.is_none());
+        }
+        assert_eq!(repo.branch("side").unwrap(), None);
+        assert_eq!(repo.tag("v1").unwrap(), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn empty_repository_advertises_capabilities() {

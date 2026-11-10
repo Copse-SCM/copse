@@ -24,7 +24,9 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 const VERSION_LINE: &str = "version https://git-lfs.github.com/spec/v1\n";
@@ -201,6 +203,63 @@ pub fn smudge(dir: &Path, p: &Pointer, dest: &Path) -> Result<bool> {
         fs::write(dest, p.text())?;
         Ok(false)
     }
+}
+
+/// Open one component relative to an already-open directory. O_NOFOLLOW applies
+/// to every component because none of these names contains a path separator.
+fn open_lfs_component(parent: &fs::File, name: &std::ffi::OsStr, flags: i32) -> std::io::Result<fs::File> {
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: parent owns a live descriptor, name is NUL-terminated, and the
+    // returned descriptor is transferred to File exactly once on success.
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o666 as libc::c_uint) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+/// Replace only a pointer (or a missing file), using the same open file for the
+/// check and the write. Directory descriptors prevent parent-symlink races too.
+fn materialize(repo: &Repo, path: &str, p: &Pointer) -> Result<bool> {
+    if !cached(&repo.dir, p) {
+        return Ok(false);
+    }
+    let relative = crate::objects::disk_path(Path::new(""), path);
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() || components.iter().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        bail!("refusing unsafe LFS path {path}");
+    }
+    let (name, parents) = components.split_last().unwrap();
+    let mut parent = fs::File::open(&repo.root)?;
+    for component in parents {
+        parent = open_lfs_component(&parent, component.as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY)
+            .with_context(|| format!("opening LFS path {path} without following symlinks"))?;
+    }
+    let mut source = fs::File::open(cache_path(&repo.dir, &p.oid))?;
+    let flags = libc::O_RDWR | libc::O_NONBLOCK;
+    let (mut dest, created) = match open_lfs_component(&parent, name.as_os_str(), flags) {
+        Ok(file) => (file, false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let file = open_lfs_component(&parent, name.as_os_str(), flags | libc::O_CREAT | libc::O_EXCL)
+                .with_context(|| format!("creating LFS file {path} without following symlinks"))?;
+            (file, true)
+        }
+        Err(e) => return Err(e).with_context(|| format!("opening LFS file {path} without following symlinks")),
+    };
+    if !dest.metadata()?.is_file() {
+        bail!("refusing LFS path {path}: it isn't a regular file");
+    }
+    if !created {
+        let mut head = [0u8; 1025];
+        let n = read_up_to(&mut dest, &mut head)?;
+        if Pointer::parse(&head[..n]).as_ref() != Some(p) {
+            return Ok(false); // Preserve edits, including an edited pointer.
+        }
+    }
+    dest.seek(SeekFrom::Start(0))?;
+    dest.set_len(0)?;
+    std::io::copy(&mut source, &mut dest).with_context(|| format!("writing LFS file {path}"))?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------- the server
@@ -435,10 +494,7 @@ pub fn after_checkout(repo: &Repo, attrs: &Attrs, files: &[(&str, Mode, Id)]) ->
             continue;
         }
         if let Some(p) = pointers_in(repo, &[*id])?.into_iter().next() {
-            let full = crate::objects::disk_path(&repo.root, path);
-            let is_pointer = fs::read(&full).map(|d| Pointer::parse(&d).is_some()).unwrap_or(false);
-            if is_pointer && cached(&repo.dir, &p) {
-                smudge(&repo.dir, &p, &full)?;
+            if materialize(repo, path, &p)? {
                 done.push(path.to_string());
             }
         }
@@ -523,9 +579,7 @@ pub fn lfs(cmd: LfsCmd) -> Result<()> {
             let n = download(&repo, &pointers)?;
             let mut written = 0;
             for (path, p) in paths {
-                let full = crate::objects::disk_path(&repo.root, &path);
-                let on_disk_is_pointer = fs::read(&full).map(|d| Pointer::parse(&d).is_some()).unwrap_or(true);
-                if on_disk_is_pointer && smudge(&repo.dir, &p, &full)? {
+                if materialize(&repo, &path, &p)? {
                     written += 1;
                 }
             }
@@ -544,4 +598,87 @@ pub fn lfs(cmd: LfsCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> (PathBuf, Repo, Pointer, Id) {
+        let dir = std::env::temp_dir().join(format!("copse-lfs-path-{name}-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        fs::create_dir(dir.join("repo")).unwrap();
+        let repo = Repo::init(&dir.join("repo")).unwrap();
+        fs::write(repo.root.join(".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n").unwrap();
+        let payload = repo.root.join("payload.bin");
+        fs::write(&payload, b"downloaded contents").unwrap();
+        let text = clean(&repo.dir, &payload, true).unwrap();
+        fs::remove_file(payload).unwrap();
+        let pointer = Pointer::parse(&text).unwrap();
+        let id = repo.store.put(Kind::Blob, &text).unwrap();
+        (dir, repo, pointer, id)
+    }
+
+    #[test]
+    fn lfs_checkout_refuses_file_symlinks() {
+        let (dir, repo, p, id) = fixture("file-link");
+        let outside = dir.join("outside");
+        fs::write(&outside, p.text()).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.root.join("file.bin")).unwrap();
+        assert!(after_checkout(&repo, &Attrs::load(&repo.root), &[("file.bin", Mode::File, id)]).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), p.text().as_bytes());
+        assert!(fs::symlink_metadata(repo.root.join("file.bin")).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lfs_checkout_refuses_symlinked_parent_folders() {
+        let (dir, repo, p, id) = fixture("parent-link");
+        let outside = dir.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("file.bin"), p.text()).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.root.join("assets")).unwrap();
+        assert!(after_checkout(&repo, &Attrs::load(&repo.root), &[("assets/file.bin", Mode::File, id)]).is_err());
+        assert_eq!(fs::read(outside.join("file.bin")).unwrap(), p.text().as_bytes());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lfs_materialization_refuses_dangling_links_and_non_files() {
+        let (dir, repo, p, _) = fixture("dangling");
+        let outside = dir.join("missing");
+        let link = repo.root.join("file.bin");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(materialize(&repo, "file.bin", &p).is_err());
+        assert!(!outside.exists());
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        fs::remove_file(&link).unwrap();
+        fs::create_dir(&link).unwrap();
+        assert!(materialize(&repo, "file.bin", &p).is_err());
+        assert!(link.is_dir());
+        assert!(materialize(&repo, "../missing", &p).is_err());
+        assert!(!outside.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lfs_materialization_preserves_edits_and_handles_regular_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, repo, p, _) = fixture("regular");
+        let file = repo.root.join("file.bin");
+        fs::write(&file, p.text()).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(materialize(&repo, "file.bin", &p).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"downloaded contents");
+        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o755);
+        for edit in [b"edited".as_slice(), b"", b"version https://git-lfs.github.com/spec/v1\noid sha256:edited\n"] {
+            fs::write(&file, edit).unwrap();
+            assert!(!materialize(&repo, "file.bin", &p).unwrap());
+            assert_eq!(fs::read(&file).unwrap(), edit);
+        }
+        fs::remove_file(&file).unwrap();
+        assert!(materialize(&repo, "file.bin", &p).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"downloaded contents");
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

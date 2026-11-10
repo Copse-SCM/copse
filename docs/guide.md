@@ -90,7 +90,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse stash pop [n]` / `apply [n]` | Bring a stash back; `pop` also removes it, `apply` keeps it |
 | `copse stash drop [n]` | Delete a stash |
 | `copse tag` / `tag <name> [rev]` / `tag -a <name> -m "..."` / `tag -d <name>` | List tags; tag a commit (lightweight); make an annotated tag with its own message, author and date; delete a tag. Tags work anywhere a commit is expected (`checkout v1.0`, `v1.0~2`) and show in `log`. |
-| `copse restore <file or folder>... [--from rev]` | Put files back as they were in the last commit (or in `rev`). Deleted files come back; new files are left alone. |
+| `copse restore <file or folder>... [--from rev]` | Put files back as they were in the last commit (or in `rev`). Deleted files come back; new files absent from `rev` are left alone. New files replaced by paths in `rev` are backed up as a stash first. Existing files excluded from the backup scan (for example, ignored files) must be moved aside first. |
 | `copse reset [rev]` / `reset --hard [rev]` | Move the current branch to `rev`, keeping your files as they are (so `reset HEAD~1` uncommits); `--hard` also makes your files match. `reset --hard` alone discards uncommitted changes. |
 | `copse cherry-pick <commit>... \| A..B` | Copy commits onto the current branch, keeping their author and message. `--continue`/`--skip`/`--abort` after a conflict; `-m N` for a merge commit. |
 | `copse revert <commit>... \| A..B` | Add commits that undo earlier ones (git's `Revert "…"` message). Same options as cherry-pick. |
@@ -318,7 +318,7 @@ copse pull                                           # get the other machine's w
 - **Push won't lose work.** If the remote branch has commits you don't have, push refuses until you `pull`, unless you pass `-f`.
 - **Concurrent pushes can't clobber each other.** The remote updates a branch under a lock, and only if it hasn't moved since you looked.
 - **Checked-out branches are protected.** copse won't push into a branch that a non-bare repository has checked out, because that would change files under someone's feet.
-- **Every transfer is verified.** Each received object is re-hashed before it's kept. Commits are written last, so an interrupted transfer never leaves a commit whose files are missing.
+- **Every transfer is verified.** Each received object is re-hashed before it's kept. Before updating a pushed branch or tag, the receiver checks every object it reaches for missing contents, corruption and incorrect types. Declared shallow boundaries may omit parent history, but still require complete trees and file contents. Submodule commits belong to their own repositories.
 
 **Tags** travel too: `fetch`, `pull` and `clone` bring the remote's tags (yours are never overwritten; a tag that differs is reported and kept as yours), and `copse push origin v1.0` or `copse push --tags` sends them. A tag that already exists on the remote with a different commit is refused unless you pass `--force`.
 
@@ -394,6 +394,7 @@ copse push                   # uploads the files' contents to the LFS server, th
 - **`clone`, `pull` and `checkout`** download the contents they need and write the real files. `status` and `commit` turn your files back into pointers.
 - **The server** is the one git-lfs would use for the remote (`<repository>.git/info/lfs`, over HTTPS with your saved credentials), or `lfs.url` in copse's settings or in `.lfsconfig`.
 - **`copse lfs pull`** fetches anything missing. `copse lfs ls-files` lists the LFS files (`*` = downloaded).
+- **LFS writes refuse symlinks.** `copse lfs pull` and post-checkout LFS writes refuse a symlink at the file or any parent folder inside the repository. Move the link aside before retrying; existing file edits are left alone.
 - **Note:** copse itself handles big files well (they're streamed), so LFS is mainly for repositories that already use it.
 
 ## Partial clones
@@ -468,6 +469,7 @@ Cloning or pulling someone else's repository is safe from the tricks git itself 
 - **`copse fsck`** re-hashes every object and checks it matches its id. It also opens every pack index and walks from every branch, tag, stash and reflog entry to confirm everything they need is there. It reports damaged and missing objects with what needs them, and exits 1 if there are any. Missing objects that only the reflog mentions are warnings.
 - **Crash safety.** An object is flushed to disk (fsync) before it's renamed into place, and before any ref, HEAD or the index changes. Refs themselves are flushed fully (F_FULLFSYNC on macOS) and replaced in one rename. A crash can lose the last command's work, but it can't leave a branch pointing at a missing or half-written object. This costs about 10 ms on a commit. `COPSE_FSYNC=0` or `core.fsync = false` turns it off.
 - **Large files** (32 MB and up) are hashed, compressed, checked and checked out in 1 MB pieces. Memory use stays flat: a 100 MB or 200 MB file commits, packs, verifies and restores in under 10 MB. Pushing and cloning still hold one file's compressed form in memory at a time.
+- **State-file locks.** Replacing a ref, HEAD, the index or another state file requires creating its `.lock` file exclusively. If that lock already exists, the write fails without changing it. Retry after the other operation finishes. After an interrupted operation, only remove a leftover lock once you're sure no process is using it.
 
 ## Why it's faster than git
 
@@ -571,7 +573,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | Suite | Checks | What it covers |
 |---|---|---|
 | `branches.sh` | 54 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
-| `bridge.sh` | 42 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
+| `bridge.sh` | 46 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
 | `commit.sh` | 61 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
@@ -584,7 +586,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
 | `rebase.sh` | 78 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 35 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
-| `restore.sh` | 33 | `restore` and `reset`, including the automatic backups |
+| `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
 | `safety.sh` | 40 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 23 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 32 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |

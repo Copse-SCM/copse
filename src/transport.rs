@@ -215,7 +215,7 @@ pub fn write_pack(w: &mut impl Write, store: &Store, ids: &[Id]) -> Result<(usiz
 ///
 /// Small transfers become loose objects, with commits written last. Larger ones are
 /// streamed into a single pack file, which becomes visible only once it's complete.
-/// Either way, an interrupted transfer never leaves a commit whose files are missing.
+/// Refs are updated separately, only after their reachable objects are validated.
 pub fn read_pack(r: &mut impl Read, store: &Store) -> Result<(usize, u64)> {
     let (mut count, mut bytes) = (0usize, 0u64);
     let mut batch: Vec<(Id, Vec<u8>)> = Vec::new();
@@ -611,22 +611,60 @@ pub fn serve(path: &Path) -> Result<()> {
     }
 }
 
-/// After receiving a push: boundary commits a shallow client announced, whose
-/// parents we don't have, become our boundary too.
-fn take_boundary(repo: &Repo, announced: &[Id]) -> Result<()> {
+/// Validate the complete graph before publishing a pushed ref. Only explicitly
+/// shallow commits may omit parents; their trees and blobs must still be present.
+/// Submodule ids belong to another repository and are not local objects.
+/// Return the proposed shallow set without changing repository metadata on error.
+fn validate_push(repo: &Repo, tip: Id, want: Option<Kind>, announced: &[Id]) -> Result<HashSet<Id>> {
     let mut shallow = repo.shallow();
-    let before = shallow.len();
-    for id in announced {
-        if let Ok(c) = repo.read_commit_raw(id) {
-            if c.parents.iter().any(|p| !repo.store.contains(p)) {
-                shallow.insert(*id);
+    let announced: HashSet<Id> = announced.iter().copied().collect();
+    let mut checked: HashMap<Id, Kind> = HashMap::new();
+    let mut stack = vec![(tip, want)];
+    while let Some((id, want)) = stack.pop() {
+        let kind = if let Some(kind) = checked.get(&id) {
+            *kind
+        } else {
+            if !repo.store.contains(&id) {
+                bail!("pushed history is missing object {}", id.to_hex());
             }
+            repo.store.verify(&id).with_context(|| format!("checking pushed object {}", id.to_hex()))?
+        };
+        // Check the kind on every edge, even if this object was already visited
+        // under a different role (for example, both a tree and a file).
+        if want.is_some_and(|want| want != kind) {
+            bail!("pushed object {} is a {kind:?}, expected a {:?}", id.to_hex(), want.unwrap());
+        }
+        if checked.insert(id, kind).is_some() {
+            continue;
+        }
+        match kind {
+            Kind::Commit => {
+                let c = repo.read_commit_raw(&id).with_context(|| format!("reading pushed commit {}", id.to_hex()))?;
+                if announced.contains(&id) && c.parents.iter().any(|p| !repo.store.contains(p)) {
+                    shallow.insert(id);
+                }
+                stack.push((c.tree, Some(Kind::Tree)));
+                if !shallow.contains(&id) {
+                    stack.extend(c.parents.into_iter().map(|p| (p, Some(Kind::Commit))));
+                }
+            }
+            Kind::Tree => {
+                for entry in decode_tree(&repo.store.get_kind(&id, Kind::Tree)?)? {
+                    match entry.mode {
+                        Mode::Submodule => {}
+                        Mode::Dir => stack.push((entry.id, Some(Kind::Tree))),
+                        _ => stack.push((entry.id, Some(Kind::Blob))),
+                    }
+                }
+            }
+            Kind::Tag => {
+                let tag = crate::objects::Tag::decode(&repo.store.get_kind(&id, Kind::Tag)?)?;
+                stack.push((tag.object, Some(tag.target_kind)));
+            }
+            Kind::Blob => {}
         }
     }
-    if shallow.len() != before {
-        repo.set_shallow(&shallow)?;
-    }
-    Ok(())
+    Ok(shallow)
 }
 
 fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, announced: &[Id]) -> Result<bool> {
@@ -714,8 +752,10 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
                 writeln!(w, "ready")?;
                 w.flush()?;
                 read_pack(r, &repo.store)?;
-                take_boundary(repo, announced)?;
-                repo.store.get(&new).context("the tagged object didn't arrive")?;
+                let shallow = validate_push(repo, new, None, announced)?;
+                if shallow != repo.shallow() {
+                    repo.set_shallow(&shallow)?;
+                }
                 repo.set_tag(tag, &new)?;
             }
             writeln!(w, "ok")?;
@@ -758,8 +798,10 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
             writeln!(w, "ready")?;
             w.flush()?;
             read_pack(r, &repo.store)?;
-            take_boundary(repo, announced)?;
-            repo.read_commit(&new).context("the pushed commit didn't arrive")?;
+            let shallow = validate_push(repo, new, Some(Kind::Commit), announced)?;
+            if shallow != repo.shallow() {
+                repo.set_shallow(&shallow)?;
+            }
             repo.cas_branch(branch, old, &new)?;
             writeln!(w, "ok")?;
         }
@@ -771,8 +813,142 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
 
 #[cfg(test)]
 mod tests {
-    use super::read_pack;
-    use crate::objects::{encode_tree, full_entry, Id, Kind, Mode, Store, TreeEntry};
+    use super::{read_pack, serve_one};
+    use crate::objects::{encode_tree, full_entry, Commit, Id, Kind, Mode, Store, Tag, TreeEntry};
+    use crate::repo::Repo;
+
+    fn push_repo(name: &str) -> (std::path::PathBuf, Repo, Id) {
+        let dir = std::env::temp_dir().join(format!("copse-push-{name}-{}", std::process::id()));
+        let repo = Repo::init_bare(&dir).unwrap();
+        let tree = repo.store.put(Kind::Tree, &encode_tree(&[])).unwrap();
+        let old = repo.store.put(Kind::Commit, &Commit::new(tree, vec![], "existing".into()).encode()).unwrap();
+        repo.cas_branch("main", None, &old).unwrap();
+        (dir, repo, old)
+    }
+
+    #[test]
+    fn incomplete_native_pushes_leave_refs_and_boundaries_unchanged() {
+        let blob = b"contents".to_vec();
+        let blob_id = Store::hash(Kind::Blob, &blob);
+        let tree = encode_tree(&[TreeEntry { name: "file".into(), mode: Mode::File, id: blob_id }]);
+        let tree_id = Store::hash(Kind::Tree, &tree);
+        let missing = Store::hash(Kind::Blob, b"not sent");
+        let commit = |tree, parents| Commit::new(tree, parents, "incoming".into()).encode();
+        let parent = commit(missing, vec![]);
+        let parent_id = Store::hash(Kind::Commit, &parent);
+        let subtree = encode_tree(&[TreeEntry { name: "folder".into(), mode: Mode::Dir, id: tree_id }]);
+        let subtree_id = Store::hash(Kind::Tree, &subtree);
+        let wrong_type = encode_tree(&[
+            TreeEntry { name: "a-file".into(), mode: Mode::File, id: tree_id },
+            TreeEntry { name: "z-folder".into(), mode: Mode::Dir, id: tree_id },
+        ]);
+        let wrong_type_id = Store::hash(Kind::Tree, &wrong_type);
+        let cases = [
+            ("missing-tree", vec![(Kind::Commit, commit(tree_id, vec![]))]),
+            ("missing-blob", vec![(Kind::Tree, tree.clone()), (Kind::Commit, commit(tree_id, vec![]))]),
+            ("missing-parent", vec![(Kind::Blob, blob.clone()), (Kind::Tree, tree.clone()), (Kind::Commit, commit(tree_id, vec![missing]))]),
+            ("parent-tree", vec![(Kind::Blob, blob.clone()), (Kind::Tree, tree.clone()), (Kind::Commit, parent), (Kind::Commit, commit(tree_id, vec![parent_id]))]),
+            ("nested-tree", vec![(Kind::Tree, subtree), (Kind::Commit, commit(subtree_id, vec![]))]),
+            ("wrong-kind", vec![(Kind::Blob, blob.clone()), (Kind::Tree, tree.clone()), (Kind::Tree, wrong_type), (Kind::Commit, commit(wrong_type_id, vec![]))]),
+            ("blob-as-tree", vec![(Kind::Blob, blob.clone()), (Kind::Commit, commit(blob_id, vec![]))]),
+            ("blob-as-parent", vec![(Kind::Blob, blob.clone()), (Kind::Tree, tree.clone()), (Kind::Commit, commit(tree_id, vec![blob_id]))]),
+            ("malformed-parent", vec![(Kind::Blob, blob.clone()), (Kind::Tree, tree.clone()), (Kind::Commit, b"invalid".to_vec()), (Kind::Commit, commit(tree_id, vec![Store::hash(Kind::Commit, b"invalid")]))]),
+        ];
+        for (name, objects) in cases {
+            let (dir, repo, old) = push_repo(name);
+            let (bytes, ids) = transfer(&objects);
+            let tip = *ids.last().unwrap();
+            let before_log = std::fs::read(repo.dir.join("logs/refs/main")).unwrap();
+            let result = serve_one(&repo, &format!("push main {} {}", old.to_hex(), tip.to_hex()), &mut bytes.as_slice(), &mut Vec::new(), &[]);
+            assert!(result.is_err(), "{name}: incomplete push was accepted");
+            assert_eq!(repo.branch("main").unwrap(), Some(old), "{name}: ref moved");
+            assert_eq!(std::fs::read(repo.dir.join("logs/refs/main")).unwrap(), before_log, "{name}: reflog changed");
+            assert!(!repo.dir.join("shallow").exists(), "{name}: shallow boundary changed");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn shallow_native_push_still_requires_a_complete_tree() {
+        let (dir, repo, old) = push_repo("shallow-incomplete");
+        let missing = Store::hash(Kind::Blob, b"missing");
+        let tree = encode_tree(&[TreeEntry { name: "file".into(), mode: Mode::File, id: missing }]);
+        let tree_id = Store::hash(Kind::Tree, &tree);
+        let commit = Commit::new(tree_id, vec![missing], "boundary".into()).encode();
+        let (bytes, ids) = transfer(&[(Kind::Tree, tree), (Kind::Commit, commit)]);
+        let tip = ids[1];
+        assert!(serve_one(&repo, &format!("push main {} {}", old.to_hex(), tip.to_hex()), &mut bytes.as_slice(), &mut Vec::new(), &[tip]).is_err());
+        assert_eq!(repo.branch("main").unwrap(), Some(old));
+        assert!(repo.shallow().is_empty());
+        assert!(!repo.dir.join("shallow").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_tags_require_their_targets_complete() {
+        let (dir, repo, _) = push_repo("tag-incomplete");
+        let missing = Store::hash(Kind::Blob, b"missing");
+        let tag = Tag::new(missing, Kind::Commit, "v1", "incomplete".into()).encode();
+        let (bytes, ids) = transfer(&[(Kind::Tag, tag)]);
+        assert!(serve_one(&repo, &format!("pushtag v1 none {}", ids[0].to_hex()), &mut bytes.as_slice(), &mut Vec::new(), &[]).is_err());
+        assert_eq!(repo.tag("v1").unwrap(), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn complete_native_pushes_allow_existing_objects_submodules_and_nested_tags() {
+        let (dir, repo, old) = push_repo("complete");
+        let blob = repo.store.put(Kind::Blob, b"already here").unwrap();
+        let tree = encode_tree(&[
+            TreeEntry { name: "file".into(), mode: Mode::File, id: blob },
+            TreeEntry { name: "module".into(), mode: Mode::Submodule, id: crate::objects::gitlink_id(&[7; 20]) },
+        ]);
+        let tree_id = Store::hash(Kind::Tree, &tree);
+        let commit = Commit::new(tree_id, vec![old], "complete".into()).encode();
+        let (bytes, ids) = transfer(&[(Kind::Tree, tree), (Kind::Commit, commit)]);
+        let tip = ids[1];
+        let mut reply = Vec::new();
+        serve_one(&repo, &format!("push main {} {}", old.to_hex(), tip.to_hex()), &mut bytes.as_slice(), &mut reply, &[]).unwrap();
+        assert_eq!(reply, b"ready\nok\n");
+        assert_eq!(repo.branch("main").unwrap(), Some(tip));
+
+        let inner = Tag::new(tip, Kind::Commit, "inner", "inner".into()).encode();
+        let inner_id = Store::hash(Kind::Tag, &inner);
+        let outer = Tag::new(inner_id, Kind::Tag, "outer", "outer".into()).encode();
+        let (bytes, ids) = transfer(&[(Kind::Tag, inner), (Kind::Tag, outer)]);
+        serve_one(&repo, &format!("pushtag outer none {}", ids[1].to_hex()), &mut bytes.as_slice(), &mut Vec::new(), &[]).unwrap();
+        assert_eq!(repo.tag("outer").unwrap(), Some(ids[1]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn complete_shallow_native_push_records_only_reachable_boundaries() {
+        let (dir, repo, old) = push_repo("shallow-complete");
+        let tree = repo.read_commit_raw(&old).unwrap().tree;
+        let missing = Store::hash(Kind::Commit, b"omitted parent");
+        let commit = Commit::new(tree, vec![missing], "shallow".into()).encode();
+        let unrelated = Commit::new(tree, vec![missing], "unrelated".into()).encode();
+        let (bytes, ids) = transfer(&[(Kind::Commit, commit), (Kind::Commit, unrelated)]);
+        serve_one(&repo, &format!("push main {} {}", old.to_hex(), ids[0].to_hex()), &mut bytes.as_slice(), &mut Vec::new(), &ids).unwrap();
+        assert_eq!(repo.branch("main").unwrap(), Some(ids[0]));
+        assert_eq!(repo.shallow(), std::collections::HashSet::from([ids[0]]));
+        assert_eq!(Repo::open_path(&dir).unwrap().shallow(), repo.shallow());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_push_rejects_corrupt_objects_already_in_the_receiver() {
+        let (dir, repo, old) = push_repo("corrupt-existing");
+        let blob = repo.store.put(Kind::Blob, b"original").unwrap();
+        std::fs::write(repo.store.loose_path(&blob), full_entry(Kind::Blob, b"corrupt").unwrap()).unwrap();
+        let tree = encode_tree(&[TreeEntry { name: "file".into(), mode: Mode::File, id: blob }]);
+        let commit = Commit::new(Store::hash(Kind::Tree, &tree), vec![old], "bad existing blob".into()).encode();
+        let (bytes, ids) = transfer(&[(Kind::Tree, tree), (Kind::Commit, commit)]);
+        let err = serve_one(&repo, &format!("push main {} {}", old.to_hex(), ids[1].to_hex()), &mut bytes.as_slice(), &mut Vec::new(), &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("doesn't match its id"));
+        assert_eq!(repo.branch("main").unwrap(), Some(old));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A transfer in copse's format: frames of id | length | raw object, then 32 zero bytes.
     fn transfer(objects: &[(Kind, Vec<u8>)]) -> (Vec<u8>, Vec<Id>) {

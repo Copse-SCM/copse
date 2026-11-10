@@ -88,5 +88,35 @@ cps rebase --abort >/dev/null && cps checkout -f main >/dev/null
 cps checkout HEAD~1 >/dev/null && cps reset --hard HEAD~1 >/dev/null && same "$(cat a.txt)" "v1" "reset works on a detached HEAD" || fail "line $LINENO: a step before this check failed"
 cps checkout -f main >/dev/null
 
+echo "== restore protects new files that exist in an older revision"
+mkdir "$WORK/collisions" && cd "$WORK/collisions" && cps init >/dev/null
+echo anchor > anchor.txt && mkdir old
+echo historical > old/file.txt && ln -s anchor.txt old/link
+cps commit -m "with old files" >/dev/null
+rm old/file.txt old/link && rmdir old && cps commit -m "remove old files" >/dev/null
+mkdir old && echo unsaved > old/file.txt
+cps restore --from HEAD~1 old/file.txt >/dev/null
+same "$(cat old/file.txt) | $(stashes)" "historical | 1" "restoring an older file backs up the new file it replaces"
+rm old/file.txt && cps stash apply >/dev/null
+same "$(cat old/file.txt)" "unsaved" "the new file's original contents are recoverable"
+cps stash drop >/dev/null
+ln -s missing-target old/link && echo unrelated > old/unrelated.txt
+cps restore --from HEAD~1 old >/dev/null
+[[ "$(cat old/file.txt)" == historical && "$(readlink old/link)" == anchor.txt && "$(cat old/unrelated.txt)" == unrelated && "$(stashes)" == 1 ]] && ok "folder restore backs up colliding files and symlinks, leaving unrelated files alone" || fail "folder restore lost uncommitted work"
+rm old/file.txt old/link old/unrelated.txt && cps stash apply >/dev/null
+[[ "$(cat old/file.txt)" == unsaved && "$(readlink old/link)" == missing-target && "$(cat old/unrelated.txt)" == unrelated ]] && ok "the backup recovers the new file, dangling symlink and unrelated addition" || fail "the backup didn't preserve the new paths"
+cps stash drop >/dev/null
+printf 'held lock\n' > .copse/stash.lock
+expect_fail "a failed backup stops restore before overwriting" "already exists" cps restore --from HEAD~1 old/file.txt
+same "$(cat old/file.txt) | $(cat .copse/stash.lock)" "unsaved | held lock" "backup failure preserves the file and the other writer's lock"
+rm .copse/stash.lock old/file.txt old/link
+echo historical > old/file.txt && ln -s anchor.txt old/link
+cps restore --from HEAD~1 old >/dev/null
+same "$(stashes)" "0" "matching files and unrelated additions do not create unnecessary backups"
+echo old/file.txt > .copseignore && echo ignored-work > old/file.txt
+echo anchor-work > anchor.txt
+expect_fail "restore refuses a collision excluded from the backup scan" "not included in the backup scan" cps restore --from HEAD~1 anchor.txt old/file.txt
+same "$(cat old/file.txt) | $(cat anchor.txt) | $(stashes)" "ignored-work | anchor-work | 0" "all requested files remain untouched when a collision cannot be backed up"
+
 echo
 echo "All $pass checks passed."

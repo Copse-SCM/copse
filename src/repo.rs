@@ -659,17 +659,34 @@ fn check_clash(existing: impl Iterator<Item = String>, name: &str, kind: &str) -
 /// Write via a temp file and rename, so a crash never leaves a half-written file.
 /// Replace a small state file (a ref, HEAD, the index...) all at once, crash-safely:
 /// objects it may name are flushed first, then the new contents, then the rename.
+/// An existing lock belongs to another writer (or an interrupted operation) and
+/// must never be overwritten or removed by this writer.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
     crate::durable::flush_pending()?;
     let mut tmp = OsString::from(path.as_os_str());
     tmp.push(".lock");
     let tmp = PathBuf::from(tmp);
-    let mut f = fs::File::create(&tmp)?;
-    f.write_all(data)?;
-    crate::durable::sync_file_fully(&f)?;
-    drop(f);
-    fs::rename(&tmp, path)?;
+    let mut f = match fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            bail!("cannot lock {}: {} already exists (another operation may be running)", path.display(), tmp.display());
+        }
+        Err(e) => return Err(e).with_context(|| format!("creating lock {}", tmp.display())),
+    };
+    let result = (|| -> Result<()> {
+        f.write_all(data)?;
+        crate::durable::sync_file_fully(&f)?;
+        drop(f);
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // The rename released our lock. A later error must not remove a new
+    // writer's lock at the same path.
     if let Some(dir) = path.parent() {
         crate::durable::sync_dir(dir)?;
     }
@@ -679,6 +696,70 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn atomic_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("copse-atomic-{name}-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn atomic_write_preserves_another_writers_lock() {
+        let dir = atomic_test_dir("contention");
+        let path = dir.join("state");
+        let lock = dir.join("state.lock");
+        fs::write(&path, b"original").unwrap();
+        let mut owner = fs::OpenOptions::new().write(true).create_new(true).open(&lock).unwrap();
+        owner.write_all(b"pending").unwrap();
+
+        assert!(write_atomic(&path, b"competing").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read(&lock).unwrap(), b"pending");
+
+        // The writer holding the lock can still finish publishing its own bytes.
+        owner.write_all(b" update").unwrap();
+        drop(owner);
+        fs::rename(&lock, &path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"pending update");
+        write_atomic(&path, b"next").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"next");
+        assert!(!lock.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_cleans_its_lock_when_rename_fails() {
+        let dir = atomic_test_dir("failure");
+        let path = dir.join("state");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"original").unwrap();
+
+        assert!(write_atomic(&path, b"replacement").is_err());
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"original");
+        assert!(!dir.join("state.lock").exists());
+        fs::remove_file(path.join("keep")).unwrap();
+        fs::remove_dir(path).unwrap();
+        write_atomic(&dir.join("state"), b"retry").unwrap();
+        assert_eq!(fs::read(dir.join("state")).unwrap(), b"retry");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_does_not_follow_a_lock_symlink() {
+        let dir = atomic_test_dir("symlink");
+        let path = dir.join("state");
+        let target = dir.join("other");
+        let lock = dir.join("state.lock");
+        fs::write(&path, b"original").unwrap();
+        fs::write(&target, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+
+        assert!(write_atomic(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read(&target).unwrap(), b"untouched");
+        assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn names_follow_gits_rules() {
