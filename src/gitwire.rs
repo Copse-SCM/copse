@@ -31,7 +31,8 @@ pub fn hex(id: &GitId) -> String {
 }
 
 pub fn parse_git_id(s: &str) -> Result<GitId> {
-    if s.len() != 40 {
+    // Checked as bytes first: slicing text that isn't plain ASCII could panic.
+    if s.len() != 40 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("bad git object id {s:?}");
     }
     let mut out = [0u8; 20];
@@ -829,6 +830,14 @@ pub fn delete_remote(repo: &Repo, remote: &str, url: &str, name: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_ids_that_arent_hex_without_panicking() {
+        assert!(parse_git_id(&"a".repeat(40)).is_ok());
+        assert!(parse_git_id(&format!("{}é0", "a".repeat(37))).is_err()); // 40 bytes, not ASCII
+        assert!(parse_git_id(&format!("{}zz", "a".repeat(38))).is_err());
+        assert!(parse_git_id("abc").is_err());
+    }
 
     #[test]
     fn hashes_like_git() {

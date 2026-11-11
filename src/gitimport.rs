@@ -673,7 +673,8 @@ struct ParsedCommit {
 
 fn parse_git_id(s: &str) -> Result<GitId> {
     let mut out = [0u8; 20];
-    if s.len() != 40 {
+    // Checked as bytes first: slicing text that isn't plain ASCII could panic.
+    if s.len() != 40 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("bad object id {s:?} in commit");
     }
     for (i, b) in out.iter_mut().enumerate() {

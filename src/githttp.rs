@@ -265,7 +265,7 @@ fn parse_dumb_refs(body: &str) -> Option<Vec<(String, GitId)>> {
     let mut refs = Vec::new();
     for line in body.lines().filter(|l| !l.trim().is_empty()) {
         let (id, name) = line.split_once('\t')?;
-        if id.len() != 40 {
+        if id.len() != 40 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
         let mut g = [0u8; 20];

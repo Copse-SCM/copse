@@ -234,8 +234,12 @@ pub fn upload_pack(repo: &Repo, mut body: &[u8], out: &mut impl Write) -> Result
     }
     let client_shallow_ids: HashSet<Id> = client_shallow.iter().filter_map(|g| mine(g)).collect();
 
-    // Shallow information comes first in every reply to a shallow client.
-    let shallow_reply = depth.is_some() || !client_shallow.is_empty();
+    // The shallow section (shallow/unshallow lines, then a flush) comes first in
+    // every reply, but only when the client asked to deepen: like git's own
+    // upload-pack. A shallow clone that just fetches sends its boundary in
+    // `shallow` lines without `deepen`, and git's client then expects ACK/NAK
+    // straight away; a flush there makes it fail ("expected ACK/NAK").
+    let shallow_reply = depth.is_some();
     let common: Vec<(GitId, Id)> = haves.iter().filter_map(|g| mine(g).map(|id| (*g, id))).collect();
     // Deepening an existing shallow clone: walk from the tips again, so commits below
     // its old boundary are reached (the client ignores what it already has).
