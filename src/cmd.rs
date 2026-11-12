@@ -508,6 +508,7 @@ pub(crate) fn apply_tree(
     let sparse = crate::sparse::Sparse::load(&repo.wt);
     let absent: HashSet<&str> = files.iter().filter(|f| f.absent).map(|f| f.path.as_str()).collect();
     let off_disk = |p: &str| absent.contains(p) || (sparse.outside(p) && !current.contains_key(p));
+    check_case_clashes(&repo.root, target_files)?;
 
     let to_remove: BTreeSet<String> = index
         .entries
@@ -550,9 +551,19 @@ pub(crate) fn apply_tree(
         let ids: Vec<Id> = to_write.iter().filter(|(_, m, _)| *m != Mode::Submodule).map(|(_, _, id)| *id).collect();
         repo.store.prefetch(&ids)?;
     }
-    to_write
+    // Files and folders first, in parallel; symlinks last, one at a time. A link
+    // made while another thread is writing could otherwise appear on a path that
+    // thread has already checked (`A` -> elsewhere and `a/x` on a disk that ignores
+    // case), and the file would be written through it. With links last, each one
+    // either finds a real folder in its place (and is refused) or exists before
+    // anything below it is checked.
+    let (links, plain): (Vec<_>, Vec<_>) = to_write.iter().partition(|(_, mode, _)| *mode == Mode::Link);
+    plain
         .par_iter()
         .try_for_each(|(path, mode, id)| write_file(repo, path, *mode, id).with_context(|| format!("writing {path}")))?;
+    for &(path, mode, ref id) in &links {
+        write_file(repo, path, mode, id).with_context(|| format!("writing {path}"))?;
+    }
 
     crate::lfs::after_checkout(repo, &lfs, &to_write)?;
 
@@ -576,6 +587,64 @@ pub(crate) fn apply_tree(
         .collect();
     index.entries = entries?.into_iter().collect();
     Ok((to_write.len(), to_remove.len()))
+}
+
+/// A path as a disk that ignores case (macOS, Windows, some Linux mounts) sees it,
+/// also dropping the characters macOS ignores.
+fn fold_path(path: &str) -> String {
+    path.chars().filter(|c| !crate::objects::hfs_ignorable(*c)).flat_map(char::to_lowercase).collect()
+}
+
+/// Does the disk under `root` treat names that differ only in case as the same?
+fn ignores_case(root: &std::path::Path) -> bool {
+    if fs::symlink_metadata(root.join(".copse")).is_ok() {
+        fs::symlink_metadata(root.join(".COPSE")).is_ok()
+    } else {
+        cfg!(target_os = "macos")
+    }
+}
+
+/// Before a checkout touches the disk: on a disk that ignores case, refuse a tree
+/// where a symlink and a folder would be the same entry (`A` -> elsewhere and
+/// `a/x`), since writing `a/x` would follow the link. git refuses these too
+/// (core.protectHFS). Files that only collide with each other are allowed with
+/// a warning, as git does, since only one of them can exist on this disk.
+fn check_case_clashes(root: &std::path::Path, target: &BTreeMap<String, (Mode, Id)>) -> Result<()> {
+    if !ignores_case(root) {
+        return Ok(());
+    }
+    let links: HashMap<String, &str> =
+        target.iter().filter(|(_, (m, _))| *m == Mode::Link).map(|(p, _)| (fold_path(p), p.as_str())).collect();
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    let mut collided = Vec::new();
+    for path in target.keys() {
+        let folded = fold_path(path);
+        if !links.is_empty() {
+            // Each folder on the way, compared folded with every symlink.
+            let parts: Vec<&str> = path.split('/').collect();
+            for n in 1..parts.len() {
+                let folder = parts[..n].join("/");
+                if let Some(link) = links.get(&fold_path(&folder)) {
+                    bail!(
+                        "refusing to check out {path}: this disk ignores case, so the symlink {link} and the folder {folder} are the same entry, and the file would be written through the link"
+                    );
+                }
+            }
+        }
+        if let Some(other) = seen.insert(folded, path) {
+            collided.push(format!("{other} and {path}"));
+        }
+    }
+    if !collided.is_empty() {
+        eprintln!("copse: warning: this disk ignores case, so only one of each of these can exist here:");
+        for pair in collided.iter().take(10) {
+            eprintln!("  {pair}");
+        }
+        if collided.len() > 10 {
+            eprintln!("  ... and {} more", collided.len() - 10);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn write_file(repo: &Repo, path: &str, mode: Mode, id: &Id) -> Result<()> {

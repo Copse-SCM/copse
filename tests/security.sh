@@ -69,6 +69,24 @@ hostile_repo "dup" t_dup
 expect_fail "a symlink and a folder with the same name are refused" "twice" cps clone "$WORK/dup.git" victim
 nothing_escaped && ok "and nothing is written through the link" || fail "a file was written through the link"
 
+echo "== a symlink and a folder whose names differ only in case"
+t_case() { local inner; inner=$(raw_tree "$1" "100644 pwned.txt $2"); local link; link=$(printf '../outside' | GIT_DIR="$1" git hash-object -w --stdin); raw_tree "$1" "120000 A $link" "40000 a $inner"; }
+hostile_repo "case" t_case
+mkdir probe && touch probe/x
+if [[ -e probe/X ]]; then
+  # The file would be written while the link appears, so try it many times.
+  for i in $(seq 1 20); do
+    out=$(cps clone "$WORK/case.git" victim 2>&1) && fail "try $i: A -> elsewhere and a/pwned.txt should be refused on a disk that ignores case"
+    [[ "$out" == *"same entry"* ]] || fail "try $i: wrong error: $out"
+    nothing_escaped && [[ ! -e victim ]] || fail "try $i: a file was written through the link"
+  done
+  ok "A -> elsewhere and a/pwned.txt are refused on a disk that ignores case, and nothing is written through the link (20 tries)"
+else
+  cps clone "$WORK/case.git" victim >/dev/null && [[ -L victim/A && -f victim/a/pwned.txt ]] && nothing_escaped && ok "(this disk tells case apart, so A and a/ are two entries and both are checked out)" || fail "line $LINENO: a step before this check failed"
+  rm -rf victim
+fi
+rm -rf probe
+
 echo "== a symlink replaced by a folder between commits"
 rm -rf seq.git seqw && git init -q --bare -b main seq.git && git clone -q seq.git seqw 2>/dev/null
 (cd seqw && ln -s ../outside link && git add link && git commit -qm "a link" && git push -q origin main)

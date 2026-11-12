@@ -619,7 +619,7 @@ pub fn encode_tree(entries: &[TreeEntry]) -> Vec<u8> {
 
 /// Characters macOS (HFS+/APFS) ignores when comparing file names, so ".g\u{200c}it"
 /// would be the same folder as ".git" there (git strips the same set).
-fn hfs_ignorable(c: char) -> bool {
+pub(crate) fn hfs_ignorable(c: char) -> bool {
     matches!(c as u32, 0x200c..=0x200f | 0x202a..=0x202e | 0x206a..=0x206f | 0xfeff)
 }
 
