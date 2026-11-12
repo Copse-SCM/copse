@@ -222,12 +222,27 @@ impl Repo {
     }
 
     pub fn set_branch(&self, name: &str, id: &Id) -> Result<()> {
+        self.move_branch(name, None, id)
+    }
+
+    /// Point branch `name` at `id`. With `expect`, only if the branch is still at
+    /// `expect.0` (checked under the ref's lock, so nothing can move it in between);
+    /// otherwise it fails with `expect.1` and the branch is left alone.
+    fn move_branch(&self, name: &str, expect: Option<(Option<Id>, &str)>, id: &Id) -> Result<()> {
         validate_branch(name)?;
         let before = self.branch(name)?;
         if before.is_none() {
             check_clash(self.branches()?.into_iter().map(|(b, _)| b), name, "branch")?;
         }
-        write_atomic(&self.dir.join("refs").join(ref_file(name)), format!("{}\n", id.to_hex()).as_bytes())?;
+        let path = self.dir.join("refs").join(ref_file(name));
+        write_atomic_if(&path, format!("{}\n", id.to_hex()).as_bytes(), || match expect {
+            Some((want, why)) if self.branch(name)? != want => bail!("{why}"),
+            _ => Ok(()),
+        })?;
+        let before = match expect {
+            Some((want, _)) => want,
+            None => before,
+        };
         crate::reflog::record(&self.dir, name, before, Some(*id))?;
         // Moving the checked-out branch moves HEAD too.
         if before != Some(*id) && matches!(self.head(), Ok(Head::Branch(b)) if b == name) {
@@ -276,6 +291,65 @@ impl Repo {
         match self.head()? {
             Head::Branch(b) => self.set_branch(&b, id),
             Head::Detached(_) => self.set_head(&Head::Detached(*id)),
+        }
+    }
+
+    /// Move the current branch (or detached HEAD) from `old` to `id`, failing with
+    /// nothing changed if something else moved it since `old` was read: a commit
+    /// made from `old` must never silently replace a commit made meanwhile.
+    pub fn advance_head_from(&self, old: Option<Id>, id: &Id) -> Result<()> {
+        let why = "the branch moved while this command was running (another commit, pull or checkout?), so nothing was changed; run it again";
+        match self.head()? {
+            Head::Branch(b) => self.move_branch(&b, Some((old, why)), id),
+            Head::Detached(cur) if Some(cur) != old => bail!("{why}"),
+            Head::Detached(_) => self.set_head(&Head::Detached(*id)),
+        }
+    }
+
+    /// Hold this working directory's operation lock until the result is dropped.
+    /// A command that reads the index and HEAD, then moves them (commit) takes it,
+    /// so a second one running at the same time can't build on what the first is
+    /// about to replace. A lock whose process has gone is taken over.
+    pub fn lock_operation(&self, what: &str) -> Result<OpLock> {
+        let path = self.wt.join("operation.lock");
+        // Another commit usually holds it for milliseconds, so wait a little for
+        // our turn (git fails at once; scripts running commands side by side
+        // shouldn't have to retry).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    f.write_all(format!("{} {what}\n", std::process::id()).as_bytes())?;
+                    return Ok(OpLock { path });
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    let text = fs::read_to_string(&path).unwrap_or_default();
+                    let (pid, other) = text.trim().split_once(' ').unwrap_or((text.trim(), "another command"));
+                    match pid.parse::<i32>() {
+                        Ok(pid) if pid > 0 && !process_alive(pid) => {
+                            // Left by a command that's gone. Renamed aside first, so of
+                            // two commands finding it, only one removes it.
+                            let aside = self.wt.join(format!("operation.lock.{}", std::process::id()));
+                            if fs::rename(&path, &aside).is_ok() {
+                                if fs::read_to_string(&aside).unwrap_or_default() == text {
+                                    let _ = fs::remove_file(&aside);
+                                } else {
+                                    // Someone else's fresh lock: put it back.
+                                    let _ = fs::rename(&aside, &path);
+                                }
+                            } else if std::time::Instant::now() >= deadline {
+                                bail!("couldn't take over {}, left by a command that's gone; delete it", path.display());
+                            }
+                        }
+                        _ if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                        _ => bail!(
+                            "another copse command ({other}, process {pid}) is changing this working directory; wait for it to finish (if none is running, delete {})",
+                            path.display()
+                        ),
+                    }
+                }
+                Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
+            }
         }
     }
 
@@ -637,6 +711,23 @@ pub fn validate_remote(name: &str) -> Result<()> {
 /// Each branch, tag or remote-tracking name is stored as one file. A `/` in the
 /// name is encoded, so `feature/login` is the file `feature%2Flogin`: no nested
 /// folders, no empty folders left behind, no file-versus-folder clashes.
+/// A working directory's operation lock (`Repo::lock_operation`), released when dropped.
+pub struct OpLock {
+    path: PathBuf,
+}
+
+impl Drop for OpLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn process_alive(pid: i32) -> bool {
+    // Signal 0 checks without sending anything; EPERM means it exists but isn't ours.
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 pub fn ref_file(name: &str) -> String {
     name.replace('%', "%25").replace('/', "%2F")
 }
@@ -662,6 +753,13 @@ fn check_clash(existing: impl Iterator<Item = String>, name: &str, kind: &str) -
 /// An existing lock belongs to another writer (or an interrupted operation) and
 /// must never be overwritten or removed by this writer.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    write_atomic_if(path, data, || Ok(()))
+}
+
+/// `write_atomic`, running `check` once the lock is held and giving up (with its
+/// error, and nothing written) if it fails: a compare-and-swap, since nothing else
+/// can replace the file between the check and the write.
+pub fn write_atomic_if(path: &Path, data: &[u8], check: impl FnOnce() -> Result<()>) -> Result<()> {
     use std::io::Write;
     crate::durable::flush_pending()?;
     let mut tmp = OsString::from(path.as_os_str());
@@ -681,6 +779,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("creating lock {}", tmp.display())),
     };
     let result = (|| -> Result<()> {
+        check()?;
         f.write_all(data)?;
         crate::durable::sync_file_fully(&f)?;
         drop(f);

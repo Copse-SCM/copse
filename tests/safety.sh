@@ -125,5 +125,15 @@ printf 'x' >> big.bin && cps commit -m "bigger" >/dev/null && cps checkout HEAD~
 cps checkout main >/dev/null
 cd .. && cps clone big big2 >/dev/null && cmp -s big2/small.txt big/small.txt && [[ $(wc -c < big2/big.bin) -eq 100000001 ]] && ok "it clones" || fail "line $LINENO: a step before this check failed"
 
+echo "== commits at the same time"
+mkdir race && cd race && cps init >/dev/null && echo base > base && cps commit -m base >/dev/null
+for i in $(seq 1 20); do echo "$i" > "p$i"; done
+for i in $(seq 1 20); do (cps commit "p$i" -m "p$i" >/dev/null 2>&1; echo $? > "../code$i") & done; wait
+log=$(cps log --oneline -100); lost=""
+for i in $(seq 1 20); do [[ $(cat "../code$i") == 0 ]] && echo "$log" | grep -qw "p$i" || lost+=" p$i"; done
+[[ -z "$lost" && $(echo "$log" | wc -l) -eq 21 && ! -e .copse/operation.lock ]] && ok "20 commits started at once all succeed, and every one is on the branch" || fail "lost or failed:$lost"
+echo "999999 commit" > .copse/operation.lock && echo x > x && cps commit -m x >/dev/null && ok "a lock left by a command that's gone is taken over" || fail "line $LINENO: a step before this check failed"
+cd ..
+
 echo
 echo "All $pass checks passed."

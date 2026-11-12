@@ -220,6 +220,9 @@ pub fn status(porcelain: bool) -> Result<()> {
 
 pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: bool, sign: Option<bool>, patch: bool, picks: &[String]) -> Result<()> {
     let repo = Repo::find()?;
+    // Held to the end, so two commits at once can't both start from the same
+    // commit and index (the second would drop the first's commit, or its changes).
+    let _lock = repo.lock_operation("commit")?;
     // --pick (the TUI's picked files and hunks): -p with the answers given up front.
     let choices: BTreeMap<String, crate::hunks::Choice> = picks.iter().map(|s| crate::hunks::parse_choice(s)).collect::<Result<_>>()?;
     let patch = patch || !choices.is_empty();
@@ -371,7 +374,7 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
     }
     crate::reflog::set_reason(if amended.is_some() { format!("commit --amend: {title}") } else { format!("commit: {title}") });
     let id = repo.store.put(Kind::Commit, &commit.encode())?;
-    repo.advance_head(&id)?;
+    repo.advance_head_from(head, &id)?;
 
     // The index now describes the new commit: committed paths take your files' state.
     let (mut added, mut modified, mut deleted) = (added, modified, deleted);
