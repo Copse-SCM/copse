@@ -443,7 +443,8 @@ fn pack_index_ids(idx: &[u8]) -> Result<HashSet<GitId>> {
     let fan = if v2 { 8 } else { 0 };
     let n = idx.get(fan + 255 * 4..fan + 256 * 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()) as usize).context("damaged pack index")?;
     let start = fan + 256 * 4;
-    let mut ids = HashSet::with_capacity(n);
+    // The count comes from the file: reserve no more than the file could hold.
+    let mut ids = HashSet::with_capacity(n.min(idx.len() / 20));
     for i in 0..n {
         let at = if v2 { start + i * 20 } else { start + i * 24 + 4 };
         let id: GitId = idx.get(at..at + 20).context("damaged pack index")?.try_into().unwrap();
@@ -497,7 +498,13 @@ fn read_pack(pack: &[u8]) -> Result<(HashMap<GitId, (u8, Arc<Vec<u8>>)>, usize)>
     }
 
     let byte = |pos: usize| -> Result<u8> { body.get(pos).copied().ok_or_else(|| anyhow!("the pack is truncated")) };
-    let mut entries = Vec::with_capacity(count);
+    // Every number below comes from the pack, which may be hostile: memory is only
+    // ever reserved in proportion to the bytes actually received. Each entry takes
+    // at least a header byte and a compressed stream (8 bytes or more).
+    if count > body.len() / 2 {
+        bail!("the pack is corrupt (it claims {count} objects in {} bytes)", body.len());
+    }
+    let mut entries = Vec::with_capacity(count.min(body.len() / 8));
     let mut pos = 12;
     for _ in 0..count {
         let offset = pos;
@@ -509,6 +516,9 @@ fn read_pack(pack: &[u8]) -> Result<(HashMap<GitId, (u8, Arc<Vec<u8>>)>, usize)>
         while c & 0x80 != 0 {
             c = byte(pos)?;
             pos += 1;
+            if shift > 57 {
+                bail!("the pack is corrupt (object size too large)");
+            }
             size |= ((c & 0x7f) as usize) << shift;
             shift += 7;
         }
@@ -521,6 +531,9 @@ fn read_pack(pack: &[u8]) -> Result<(HashMap<GitId, (u8, Arc<Vec<u8>>)>, usize)>
                 while c & 0x80 != 0 {
                     c = byte(pos)?;
                     pos += 1;
+                    if back > usize::MAX >> 8 {
+                        bail!("bad delta offset in pack");
+                    }
                     back = ((back + 1) << 7) | (c & 0x7f) as usize;
                 }
                 Base::Offset(offset.checked_sub(back).context("bad delta offset in pack")?)
@@ -534,12 +547,19 @@ fn read_pack(pack: &[u8]) -> Result<(HashMap<GitId, (u8, Arc<Vec<u8>>)>, usize)>
             _ => bail!("unknown object type {kind} in pack"),
         };
         let mut z = Decompress::new(true);
-        let mut data = Vec::with_capacity(size + 1);
+        // Deflate can't expand data more than about 1032 to 1, so the bytes left in
+        // the pack also bound what this entry can really hold; reserve up to that,
+        // and let the vector grow past 64 MiB only as data actually arrives.
+        let room = body.len().saturating_sub(pos).saturating_mul(1032);
+        let mut data = Vec::with_capacity(size.min(room).min(64 << 20).saturating_add(1));
         loop {
             let (in_before, out_before) = (z.total_in(), z.total_out());
             let input = body.get(pos + z.total_in() as usize..).context("the pack is truncated")?;
             if z.decompress_vec(input, &mut data, FlushDecompress::Finish)? == Status::StreamEnd {
                 break;
+            }
+            if data.len() > size {
+                bail!("the pack is corrupt (object size mismatch)");
             }
             if z.total_in() == in_before && z.total_out() == out_before {
                 // No progress: either the output needs room, or the data is bad.
@@ -560,44 +580,51 @@ fn read_pack(pack: &[u8]) -> Result<(HashMap<GitId, (u8, Arc<Vec<u8>>)>, usize)>
         bail!("the pack has unexpected trailing data");
     }
 
-    // Resolve deltas. Offset bases always come earlier in the pack; id bases can be
-    // anywhere, so keep going until nothing more can be resolved.
+    // Resolve deltas in one pass: each delta waits on its base (by position for
+    // offset deltas, by id for ref deltas) and is resolved as soon as the base is.
+    // Repeated scans over the whole list could take quadratic time on a pack whose
+    // chain of ref deltas is in reverse order.
     let index_of: HashMap<usize, usize> = entries.iter().enumerate().map(|(i, e)| (e.offset, i)).collect();
     let mut resolved: Vec<Option<(u8, Arc<Vec<u8>>)>> = vec![None; entries.len()];
     let mut by_id: HashMap<GitId, usize> = HashMap::new();
-    let mut pending: Vec<usize> = (0..entries.len()).collect();
-    while !pending.is_empty() {
-        let mut still = Vec::new();
-        for i in pending.iter().copied() {
-            let base = match &entries[i].base {
-                Base::None => None,
-                Base::Offset(off) => Some(*index_of.get(off).context("delta base missing from pack")?),
-                Base::Id(id) => match by_id.get(id) {
-                    Some(&j) => Some(j),
-                    None => {
-                        still.push(i);
-                        continue;
-                    }
-                },
-            };
-            let (kind, content) = match base {
-                None => (entries[i].kind, Arc::new(std::mem::take(&mut entries[i].data))),
-                Some(j) => match &resolved[j] {
-                    Some((k, b)) => (*k, Arc::new(apply_delta(b, &entries[i].data)?)),
-                    None => {
-                        still.push(i);
-                        continue;
-                    }
-                },
-            };
-            entries[i].data = Vec::new();
-            by_id.insert(git_hash(type_name(kind)?, &content), i);
-            resolved[i] = Some((kind, content));
+    let mut waiting_on_entry: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut waiting_on_id: HashMap<GitId, Vec<usize>> = HashMap::new();
+    let mut ready: Vec<usize> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        match &e.base {
+            Base::None => ready.push(i),
+            Base::Offset(off) => waiting_on_entry.entry(*index_of.get(off).context("delta base missing from pack")?).or_default().push(i),
+            Base::Id(id) => waiting_on_id.entry(*id).or_default().push(i),
         }
-        if still.len() == pending.len() {
-            bail!("the pack refers to objects it doesn't contain");
+    }
+    let mut done = 0;
+    while let Some(i) = ready.pop() {
+        let data = std::mem::take(&mut entries[i].data);
+        let (kind, content) = match &entries[i].base {
+            Base::None => (entries[i].kind, Arc::new(data)),
+            Base::Offset(off) => {
+                let (k, b) = resolved[index_of[off]].as_ref().context("internal error: delta base not resolved")?;
+                (*k, Arc::new(apply_delta(b, &data)?))
+            }
+            Base::Id(id) => {
+                let (k, b) = resolved[by_id[id]].as_ref().context("internal error: delta base not resolved")?;
+                (*k, Arc::new(apply_delta(b, &data)?))
+            }
+        };
+        let id = git_hash(type_name(kind)?, &content);
+        resolved[i] = Some((kind, content));
+        done += 1;
+        if let Some(children) = waiting_on_entry.remove(&i) {
+            ready.extend(children);
         }
-        pending = still;
+        if by_id.insert(id, i).is_none() {
+            if let Some(children) = waiting_on_id.remove(&id) {
+                ready.extend(children);
+            }
+        }
+    }
+    if done != entries.len() {
+        bail!("the pack refers to objects it doesn't contain");
     }
     let objects = by_id.into_iter().map(|(id, i)| (id, resolved[i].take().unwrap())).collect();
     Ok((objects, count))
@@ -608,6 +635,9 @@ fn varint(data: &[u8], pos: &mut usize) -> Result<usize> {
     loop {
         let c = *data.get(*pos).context("corrupt delta")?;
         *pos += 1;
+        if shift > 57 {
+            bail!("corrupt delta (size too large)");
+        }
         value |= ((c & 0x7f) as usize) << shift;
         shift += 7;
         if c & 0x80 == 0 {
@@ -624,7 +654,10 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
         bail!("corrupt delta (base size mismatch)");
     }
     let size = varint(delta, &mut p)?;
-    let mut out = Vec::with_capacity(size);
+    // The result is made of copies (each at most 64 KiB of the base) and literal
+    // bytes from the delta, so reserve no more than that could produce.
+    let most = delta.len().saturating_mul(0x10000 / 2).saturating_add(base.len());
+    let mut out = Vec::with_capacity(size.min(most).min(64 << 20));
     while p < delta.len() {
         let op = delta[p];
         p += 1;
@@ -645,13 +678,16 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
             if len == 0 {
                 len = 0x10000;
             }
-            out.extend_from_slice(base.get(off..off + len).context("corrupt delta (copy out of range)")?);
+            out.extend_from_slice(base.get(off..off.saturating_add(len)).context("corrupt delta (copy out of range)")?);
         } else if op != 0 {
             let n = op as usize;
             out.extend_from_slice(delta.get(p..p + n).context("corrupt delta (truncated insert)")?);
             p += n;
         } else {
             bail!("corrupt delta (reserved instruction)");
+        }
+        if out.len() > size {
+            bail!("corrupt delta (result size mismatch)");
         }
     }
     if out.len() != size {
@@ -1002,6 +1038,108 @@ fn import_objects(repo: &Repo, map: &mut GitMap, objects: &HashMap<GitId, (u8, A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pack from raw entry bytes, with a correct header and checksum.
+    fn pack_of(count: u32, entries: &[u8]) -> Vec<u8> {
+        let mut p = b"PACK".to_vec();
+        p.extend_from_slice(&2u32.to_be_bytes());
+        p.extend_from_slice(&count.to_be_bytes());
+        p.extend_from_slice(entries);
+        let digest: [u8; 20] = Sha1::digest(&p).into();
+        p.extend_from_slice(&digest);
+        p
+    }
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        z.write_all(data).unwrap();
+        z.finish().unwrap()
+    }
+
+    /// An entry header: type and size, as git packs them.
+    fn header(kind: u8, mut size: usize) -> Vec<u8> {
+        let mut out = vec![(kind << 4) | (size & 0x0f) as u8];
+        size >>= 4;
+        while size > 0 {
+            *out.last_mut().unwrap() |= 0x80;
+            out.push((size & 0x7f) as u8);
+            size >>= 7;
+        }
+        out
+    }
+
+    fn delta_varint(mut n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                return out;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    #[test]
+    fn hostile_pack_numbers_are_refused_not_allocated() {
+        // Claims four billion objects in a few bytes.
+        let err = read_pack(&pack_of(u32::MAX, &[0; 16])).unwrap_err();
+        assert!(format!("{err}").contains("claims"), "{err}");
+        // One blob claiming to be about an exabyte.
+        let mut e = header(3, 1 << 60);
+        e.extend(zlib(b"tiny"));
+        assert!(read_pack(&pack_of(1, &e)).is_err());
+        // A size field longer than any real number.
+        let mut e = vec![0xb0];
+        e.extend([0xff; 12]);
+        e.push(0x01);
+        assert!(read_pack(&pack_of(1, &e)).is_err());
+        // A delta claiming a huge result.
+        let mut d = delta_varint(4);
+        d.extend(delta_varint(usize::MAX >> 2));
+        assert!(apply_delta(b"base", &d).is_err());
+        let mut d = delta_varint(4);
+        d.extend([0xff; 12]);
+        assert!(apply_delta(b"base", &d).is_err());
+    }
+
+    #[test]
+    fn a_long_chain_of_ref_deltas_in_reverse_order_resolves_quickly() {
+        // blob 0, then deltas 1..n each on the previous one, written last-first, so
+        // a delta always appears before its base.
+        let n = 3000;
+        let mut contents = vec![b"start\n".to_vec()];
+        for i in 1..=n {
+            let mut c = contents[i - 1].clone();
+            c.extend_from_slice(format!("{i}\n").as_bytes());
+            contents.push(c);
+        }
+        let mut entries = Vec::new();
+        for i in (1..=n).rev() {
+            let base = &contents[i - 1];
+            let add = &contents[i][base.len()..];
+            let mut d = delta_varint(base.len());
+            d.extend(delta_varint(contents[i].len()));
+            // copy the whole base (offset 0, length base.len()), then insert the new line
+            d.push(0x80 | 0x10 | 0x20);
+            d.push((base.len() & 0xff) as u8);
+            d.push((base.len() >> 8) as u8);
+            d.push(add.len() as u8);
+            d.extend_from_slice(add);
+            entries.extend(header(7, d.len()));
+            entries.extend(git_hash("blob", base));
+            entries.extend(zlib(&d));
+        }
+        entries.extend(header(3, contents[0].len()));
+        entries.extend(zlib(&contents[0]));
+        let started = std::time::Instant::now();
+        let (objects, count) = read_pack(&pack_of(n as u32 + 1, &entries)).unwrap();
+        assert_eq!(count, n + 1);
+        assert_eq!(objects.len(), n + 1);
+        assert_eq!(objects[&git_hash("blob", &contents[n])].1.as_slice(), &contents[n][..]);
+        assert!(started.elapsed().as_secs() < 5, "took {:?}", started.elapsed());
+    }
 
     #[test]
     fn applies_git_deltas() {
