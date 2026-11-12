@@ -667,8 +667,14 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = OsString::from(path.as_os_str());
     tmp.push(".lock");
     let tmp = PathBuf::from(tmp);
-    let mut f = match fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+    let create = || fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
+    let mut f = match create() {
         Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::AlreadyExists && clear_stale_lock(&tmp) => match create() {
+            Ok(f) => f,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => bail!("cannot lock {}: {} already exists (another operation may be running)", path.display(), tmp.display()),
+            Err(e) => return Err(e).with_context(|| format!("creating lock {}", tmp.display())),
+        },
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             bail!("cannot lock {}: {} already exists (another operation may be running)", path.display(), tmp.display());
         }
@@ -693,9 +699,65 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// How old a lock must be before it's treated as left over by an interrupted
+/// write. A lock lives only while one file is written and renamed into place
+/// (milliseconds, or a few seconds for a huge index on a slow disk).
+pub const STALE_LOCK_SECS: u64 = 300;
+
+/// Remove `lock` if it's old enough that no live writer can still hold it.
+/// Returns whether it was removed. The lock is first renamed to a name only this
+/// process uses, and checked again there: if another process replaced the stale
+/// lock with a fresh one in between, that fresh lock is put back untouched.
+fn clear_stale_lock(lock: &Path) -> bool {
+    let old = |p: &Path| {
+        fs::symlink_metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() >= STALE_LOCK_SECS)
+    };
+    if !old(lock) {
+        return false;
+    }
+    let mut aside = OsString::from(lock.as_os_str());
+    aside.push(format!(".stale-{}", std::process::id()));
+    let aside = PathBuf::from(aside);
+    if fs::rename(lock, &aside).is_err() {
+        return false;
+    }
+    if !old(&aside) {
+        // Not the stale lock after all, but a writer's new one: give it back.
+        if fs::hard_link(&aside, lock).is_ok() {
+            let _ = fs::remove_file(&aside);
+        }
+        return false;
+    }
+    let _ = fs::remove_file(&aside);
+    eprintln!("copse: removed {}, left over by an interrupted operation", lock.display());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_lock_is_cleared_but_a_fresh_one_is_kept() {
+        let dir = atomic_test_dir("stale");
+        let path = dir.join("state");
+        let lock = dir.join("state.lock");
+        // A fresh lock: another writer is busy, so the write must fail untouched.
+        fs::write(&lock, b"theirs").unwrap();
+        assert!(write_atomic(&path, b"mine").is_err());
+        assert_eq!(fs::read(&lock).unwrap(), b"theirs");
+        // The same lock, left over from long ago: cleared, and the write succeeds.
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(STALE_LOCK_SECS + 60);
+        fs::File::options().write(true).open(&lock).unwrap().set_modified(long_ago).unwrap();
+        write_atomic(&path, b"mine").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"mine");
+        assert!(!lock.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn atomic_test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("copse-atomic-{name}-{}", std::process::id()));

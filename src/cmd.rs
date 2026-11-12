@@ -145,7 +145,9 @@ pub fn status(porcelain: bool) -> Result<()> {
     let files = snapshot(&repo.root, &index, None)?;
     let ch = changes(&index, &files);
     if refresh(&mut index, &files) {
-        index.save(&repo.wt)?;
+        // Only a cache of file timestamps: if another command is writing the index
+        // right now, skip saving rather than fail a read-only command.
+        let _ = index.save(&repo.wt);
     }
     if porcelain {
         return status_porcelain(&repo, &ch);

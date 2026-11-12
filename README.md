@@ -55,7 +55,7 @@ copse                         # the interactive screen
 
 - **Faster than git** at the everyday things: 3–4x faster `status`, 2.5–6x faster commits, and 4x faster checkouts on a 50,000-file repository. It uses BLAKE3 and zstd, does everything in parallel, and never reads files it knows haven't changed.
 - **No staging area.** `commit` takes everything, or the paths you name, or the changes you pick with `-p`.
-- **Undo for everything.** `copse undo` reverses the last commit, merge, rebase, reset or checkout. Anything that would throw work away keeps a backup first.
+- **Undo for everything.** `copse undo` reverses the last commit, merge, rebase, pull or reset on your branch (run it again to redo). Anything that would throw work away keeps a backup first.
 - **Works with git.** It speaks git's protocols over HTTPS and SSH, with signed commits, tags, submodules, LFS, and a read-only `.git` view so editors and git tools keep working. Merges, rebases and cherry-picks give the same results as git; 2,000 randomized stress rounds match it exactly.
 - **A built-in terminal interface.** Run `copse` on its own to get these screens:
   - **Changes:** pick files, or single changes within a file, and commit.
