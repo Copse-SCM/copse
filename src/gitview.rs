@@ -151,6 +151,63 @@ fn write_promisor_pack(git: &Path, objects: &[(u8, Vec<u8>)]) -> Result<()> {
     Ok(())
 }
 
+/// A value or section name in git's config syntax: quoted, so `#`, `;` and
+/// spaces are kept, with `"` and `\` escaped. None for a newline, which can't be.
+fn quoted(v: &str) -> Option<String> {
+    if v.contains(['\n', '\r', '\0']) {
+        return None;
+    }
+    Some(format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+}
+
+/// `.git/config`: git's own settings, plus copse's git remotes (so tools such as
+/// gh, and editors' remote and ahead/behind views, know where the code lives) and,
+/// for each branch origin also has, origin's as its upstream (as `copse status`
+/// treats it). Copse-only remotes are left out, since git can't talk to them.
+/// Rewritten only when it would change.
+fn write_config(repo: &Repo, git: &Path) -> Result<()> {
+    let partial = repo.is_partial().then(|| fs::read_to_string(repo.dir.join("promisor")).unwrap_or_default().trim().to_string());
+    let remotes: Vec<(String, String)> = repo
+        .remotes()?
+        .into_iter()
+        .filter_map(|(name, url)| Some((name, crate::remote::git_url(&url)?.to_string())))
+        .collect();
+    if let Some(name) = &partial {
+        if !remotes.iter().any(|(n, _)| n == name) {
+            bail!("the .git view needs every file's contents, and this is a partial clone of a copse repository (git can't fetch from it); `copse git-view off` to stop trying");
+        }
+    }
+    let mut text = format!(
+        "[core]\n\trepositoryformatversion = {}\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = false\n",
+        if partial.is_some() { 1 } else { 0 }
+    );
+    if let Some(name) = &partial {
+        text += &format!("[extensions]\n\tpartialClone = {name}\n");
+    }
+    for (name, url) in &remotes {
+        let fetch = format!("+refs/heads/*:refs/remotes/{name}/*");
+        let (Some(qname), Some(qurl), Some(qfetch)) = (quoted(name), quoted(url), quoted(&fetch)) else { continue };
+        text += &format!("[remote {qname}]\n\turl = {qurl}\n\tfetch = {qfetch}\n");
+        if partial.as_deref() == Some(name.as_str()) {
+            text += "\tpromisor = true\n\tpartialclonefilter = blob:none\n";
+        }
+    }
+    if remotes.iter().any(|(n, _)| n == "origin") {
+        for (branch, _) in repo.branches()? {
+            if repo.tracking("origin", &branch)?.is_none() {
+                continue;
+            }
+            let (Some(qbranch), Some(merge)) = (quoted(&branch), quoted(&format!("refs/heads/{branch}"))) else { continue };
+            text += &format!("[branch {qbranch}]\n\tremote = origin\n\tmerge = {merge}\n");
+        }
+    }
+    let path = git.join("config");
+    if fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+        crate::repo::write_atomic(&path, text.as_bytes())?;
+    }
+    Ok(())
+}
+
 /// Bring the view up to date. Cheap when nothing changed.
 pub fn sync(repo: &Repo) -> Result<()> {
     if repo.is_bare() || !is_on(repo) {
@@ -167,23 +224,7 @@ pub fn sync(repo: &Repo) -> Result<()> {
             fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
         }
     }
-    // A partial clone of a git server: git is told (as in its own partial clones)
-    // that origin has the contents copse hasn't downloaded, and fetches them itself.
-    // A partial clone of a copse repository can't be, since git can't fetch from it.
-    if repo.is_partial() {
-        let name = fs::read_to_string(repo.dir.join("promisor")).unwrap_or_default().trim().to_string();
-        let url = repo.remote_url(&name).ok().and_then(|u| crate::remote::git_url(&u).map(str::to_string));
-        let Some(url) = url else {
-            bail!("the .git view needs every file's contents, and this is a partial clone of a copse repository (git can't fetch from it); `copse git-view off` to stop trying");
-        };
-        fs::write(
-            git.join("config"),
-            format!(
-                "[core]\n\trepositoryformatversion = 1\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = false\n\
-                 [extensions]\n\tpartialClone = {name}\n[remote \"{name}\"]\n\turl = {url}\n\tpromisor = true\n\tpartialclonefilter = blob:none\n"
-            ),
-        )?;
-    }
+    write_config(repo, &git)?;
     // A shallow clone: git is told where history stops (.git/shallow), by git id.
     let shallow = repo.shallow();
     if shallow.is_empty() {
@@ -388,10 +429,6 @@ pub fn git_view(action: Option<bool>) -> Result<()> {
             for d in ["objects", "refs/heads", "refs/tags", "hooks", "info"] {
                 fs::create_dir_all(git.join(d))?;
             }
-            fs::write(
-                git.join("config"),
-                "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = false\n",
-            )?;
             fs::write(git.join("description"), "A read-only view of a copse repository (copse git-view).\n")?;
             // Keep git's own ignore rules out of the way of copse's files.
             fs::write(git.join("info").join("exclude"), ".copse/\n")?;

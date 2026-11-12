@@ -376,6 +376,7 @@ copse git-view off
 ```
 
 - **What's in it:** real git objects, branches, tags, HEAD, and an index matching copse's. Uncommitted changes appear in git as unstaged changes, exactly as `copse status` lists them.
+- **Remotes too.** Your git remotes and their branches are in it, with origin's branch as each branch's upstream, so `gh` and editors know where the code lives and how far ahead or behind you are. Remotes that are other copse repositories are left out, since git can't talk to them.
 - **Kept up to date** after every copse command, writing only what's new.
 - **Read-only for git.** git commands that would change files or branches (checkout, commit, merge, branch) stop before touching anything, so commit and switch with copse.
 - **An existing `.git` folder is never overwritten.**
@@ -575,7 +576,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | Suite | Checks | What it covers |
 |---|---|---|
 | `branches.sh` | 54 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
-| `bridge.sh` | 46 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
+| `bridge.sh` | 52 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
 | `commit.sh` | 61 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |

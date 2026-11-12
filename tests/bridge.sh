@@ -60,6 +60,14 @@ expect_fail "git can't commit in it" "index.lock" git commit -am x
 expect_fail "or make branches" "reference-transaction" git branch side
 cps restore b.txt >/dev/null && same "$(git status --porcelain)" "" "it stays in step with copse"
 cps branch -m feature feat2 >/dev/null && same "$(git branch --format='%(refname:short)' | tr '\n' ',')" "feat2,main," "renamed and deleted branches follow" || fail "line $LINENO: a step before this check failed"
+git init -q --bare -b main "$WORK/up.git" && cps remote add origin "$WORK/up.git" >/dev/null && cps push origin main >/dev/null 2>&1
+same "$(git remote get-url origin)" "$WORK/up.git" "git sees copse's git remotes (so gh and editors know where the code lives)"
+same "$(git rev-parse --abbrev-ref 'main@{upstream}')" "origin/main" "and origin's branch as the upstream, as copse status does"
+echo b4 > b.txt && cps commit -m four >/dev/null && git status -sb | head -1 | has "ahead 1" && ok "so git reports how far ahead you are" || fail "line $LINENO: $(git status -sb | head -1)"
+cps remote add 'odd#;"x' "$WORK/up.git" >/dev/null && same "$(git config --get 'remote.odd#;"x.url')" "$WORK/up.git" "a remote name with #, ; and \" is written so git reads it back" || fail "line $LINENO: a step before this check failed"
+mkdir "$WORK/plain" && (cd "$WORK/plain" && cps init >/dev/null)
+cps remote add mirror "$WORK/plain" >/dev/null && [[ -z "$(git config --get remote.mirror.url)" ]] && ok "copse-only remotes are left out (git can't talk to them)" || fail "line $LINENO: $(cat .git/config)"
+cps remote remove 'odd#;"x' >/dev/null && cps remote remove mirror >/dev/null && same "$(git remote)" "origin" "removed remotes go from git's view too"
 cps sparse set src >/dev/null 2>&1 || true
 same "$(git status --porcelain)" "" "with sparse checkout, git doesn't see the missing files as deleted"
 cps sparse disable >/dev/null
