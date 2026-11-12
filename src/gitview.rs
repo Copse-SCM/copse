@@ -323,8 +323,8 @@ fn write_index(repo: &Repo, git: &Path, map: &GitMap) -> Result<()> {
         // stat makes git look at the content instead (git does the same for files
         // it can't vouch for).
         let unchanged = md.as_ref().is_some_and(|m| {
-            let (size, mtime, mode) = crate::worktree::stat_of(m);
-            size == e.size && mtime == e.mtime_ns && mode == e.mode
+            let meta = crate::worktree::stat_of(m);
+            e.stat_matches(&meta) && meta.mode == e.mode
         });
         let (ctime, ctime_ns, mtime, mtime_ns, dev, ino, uid, gid, size) = match &md {
             Some(m) if unchanged => (m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec(), m.dev(), m.ino(), m.uid(), m.gid(), m.size()),

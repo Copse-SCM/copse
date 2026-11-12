@@ -395,7 +395,7 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
                         // stat that won't match, so the rest still shows as a change.
                         let entry = match on_disk.get(p.as_str()) {
                             Some(f) if f.id == *blob && f.mode == *m => f.entry(),
-                            _ => crate::worktree::Entry { size: 0, mtime_ns: 0, mode: *m, id: *blob.as_bytes() },
+                            _ => crate::worktree::Entry { size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode: *m, id: *blob.as_bytes() },
                         };
                         index.entries.insert(p.clone(), entry);
                     }
@@ -576,16 +576,16 @@ pub(crate) fn apply_tree(
     let entries: Result<Vec<_>> = target_files
         .par_iter()
         .map(|(path, (mode, id))| {
-            let (size, mtime_ns) = if written.contains(path.as_str()) {
-                let (size, mtime, _) = stat_of(&fs::symlink_metadata(crate::objects::disk_path(&repo.root, path))?);
-                (size, mtime)
+            let entry = if written.contains(path.as_str()) {
+                let meta = stat_of(&fs::symlink_metadata(crate::objects::disk_path(&repo.root, path))?);
+                crate::worktree::Entry { mode: *mode, ..meta.entry(id) }
             } else if off_disk(path) {
-                (0, 0) // not on disk (sparse checkout): nothing to cache
+                // Not on disk (sparse checkout): nothing to cache.
+                crate::worktree::Entry { size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode: *mode, id: *id.as_bytes() }
             } else {
-                let f = scanned[path.as_str()];
-                (f.size, f.mtime_ns)
+                crate::worktree::Entry { mode: *mode, id: *id.as_bytes(), ..scanned[path.as_str()].entry() }
             };
-            Ok((path.clone(), crate::worktree::Entry { size, mtime_ns, mode: *mode, id: *id.as_bytes() }))
+            Ok((path.clone(), entry))
         })
         .collect();
     index.entries = entries?.into_iter().collect();

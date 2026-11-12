@@ -30,6 +30,8 @@ const KNOWN: &[(&str, &str)] = &[
     ("core.excludesfile", "an extra ignore file for every repository (default ~/.config/copse/ignore)"),
     ("core.hookspath", "folder of hook scripts, relative to the repository (default .copse/hooks)"),
     ("core.fsync", "false to skip flushing writes to disk (faster, but a crash can lose recent work)"),
+    ("core.trustctime", "false to ignore files' change times when telling if they changed (for tools or filesystems that alter them)"),
+    ("core.checkstat", "minimal to tell changed files by size and modification time only (no change time or inode number)"),
     ("user.signingkey", "the key to sign commits with: an SSH key file, or a GPG key id"),
     ("gpg.format", "ssh or openpgp (default openpgp)"),
     ("gpg.program", "the gpg to run for openpgp signatures (default gpg)"),

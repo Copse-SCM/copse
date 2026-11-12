@@ -163,7 +163,7 @@ pub fn reset(rev: Option<&str>, hard: bool) -> Result<()> {
             .map(|(path, &(mode, id))| {
                 let entry = match scanned.get(path.as_str()) {
                     Some(f) if f.id == id && f.mode == mode => f.entry(),
-                    _ => Entry { size: 0, mtime_ns: 0, mode, id: *id.as_bytes() },
+                    _ => Entry { size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode, id: *id.as_bytes() },
                 };
                 (path.clone(), entry)
             })

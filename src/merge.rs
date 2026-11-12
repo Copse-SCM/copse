@@ -854,7 +854,7 @@ pub fn stage_as_changes(index: &mut Index, merged: &Files, ours_tree: &Files) {
     for (path, (mode, id)) in merged {
         match ours_tree.get(path) {
             Some(&(om, oid)) if (om, oid) != (*mode, *id) => {
-                index.entries.insert(path.clone(), Entry { size: 0, mtime_ns: 0, mode: om, id: *oid.as_bytes() });
+                index.entries.insert(path.clone(), Entry { size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode: om, id: *oid.as_bytes() });
             }
             None => {
                 index.entries.remove(path);
@@ -864,7 +864,7 @@ pub fn stage_as_changes(index: &mut Index, merged: &Files, ours_tree: &Files) {
     }
     for (path, (om, oid)) in ours_tree {
         if !merged.contains_key(path) {
-            index.entries.insert(path.clone(), Entry { size: 0, mtime_ns: 0, mode: *om, id: *oid.as_bytes() });
+            index.entries.insert(path.clone(), Entry { size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode: *om, id: *oid.as_bytes() });
         }
     }
 }

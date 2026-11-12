@@ -135,5 +135,15 @@ for i in $(seq 1 20); do [[ $(cat "../code$i") == 0 ]] && echo "$log" | grep -qw
 echo "999999 commit" > .copse/operation.lock && echo x > x && cps commit -m x >/dev/null && ok "a lock left by a command that's gone is taken over" || fail "line $LINENO: a step before this check failed"
 cd ..
 
+echo "== edits that keep a file's size and modification time"
+mkdir samestat && cd samestat && cps init >/dev/null
+printf 'aaaa\n' > f && touch -t 202001010000 f && cps commit -m a >/dev/null && sleep 3 && cps status >/dev/null
+printf 'bbbb\n' > f && touch -t 202001010000 f
+cps status | has "1 modified" && ok "new contents of the same size, with the old modification time put back, are seen" || fail "line $LINENO: the edit was missed"
+cps commit -m b >/dev/null && sleep 3 && cps status >/dev/null && cps config core.trustctime false >/dev/null
+printf 'cccc\n' > f && touch -t 202001010000 f
+cps status | has "Nothing changed" && ok "with core.trustctime = false the change time is ignored, as in git" || fail "line $LINENO: core.trustctime was ignored"
+cd ..
+
 echo
 echo "All $pass checks passed."

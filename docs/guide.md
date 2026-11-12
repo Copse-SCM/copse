@@ -477,7 +477,7 @@ Cloning or pulling someone else's repository is safe from the tricks git itself 
 - **No staging area.** Commit is one pass: scan, hash, store. There is no separate `git add`.
 - **BLAKE3 and zstd** in place of SHA-1 and zlib, which are several times faster each.
 - **Everything is parallel.** Scanning, hashing, compressing and checkout writes use all CPU cores.
-- **A stat cache** (`.copse/index`): files whose size and modification time haven't changed are never read. Files modified within 2 seconds of the last save are always re-hashed, so a fast edit can't slip through unnoticed.
+- **A stat cache** (`.copse/index`): files whose size, modification time, change time (ctime) and inode number haven't changed are never read. The change time and inode catch new contents of the same size put in place with the old modification time kept (`cp -p`, `rsync -a`, `tar x`). Files modified within 2 seconds of the last save are always re-hashed, so a fast edit can't slip through unnoticed. As in git, `core.trustctime = false` ignores the change time (for tools or filesystems that alter it on their own), and `core.checkStat = minimal` ignores the inode number too.
 - **Atomic writes**: objects, refs and the index are written to a temporary file and then renamed into place.
 
 ## Layout
@@ -487,6 +487,7 @@ Cloning or pulling someone else's repository is safe from the tricks git itself 
 .copse/refs/<branch>    commit id
 .copse/objects/ab/cd…   kind byte + zstd(content), named by BLAKE3(kind ‖ content)
 .copse/index            bincode stat cache of the files in the current commit
+.copse/index.stat       the cache's change times and inode numbers (kept apart, so older copse versions still read the index)
 ```
 
 ```
@@ -588,7 +589,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `rebase.sh` | 78 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 35 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
-| `safety.sh` | 42 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
+| `safety.sh` | 44 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 24 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 32 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |

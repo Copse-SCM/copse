@@ -11,7 +11,7 @@
 use crate::cmd::write_file;
 use crate::objects::{decode_tree, Id, Kind, Mode, Store};
 use crate::repo::Repo;
-use crate::worktree::{read_content, stat_of, Entry, Index, RACY_WINDOW_NS};
+use crate::worktree::{read_content, stat_of, Entry, Index};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -65,11 +65,12 @@ fn unchanged_on_disk(repo: &Repo, index: &Index, path: &str, e: &Entry) -> Resul
     if e.mode == Mode::Submodule {
         return Ok(md.is_dir());
     }
-    let (size, mtime, mode) = stat_of(&md);
+    let meta = stat_of(&md);
+    let mode = meta.mode;
     if mode != e.mode {
         return Ok(false);
     }
-    if size == e.size && mtime == e.mtime_ns && mtime < index.written_ns - RACY_WINDOW_NS {
+    if e.vouches_for(&meta, index.written_ns) {
         return Ok(true); // the stat cache vouches for it
     }
     // Look at the content.
@@ -162,18 +163,15 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
     writes.par_iter().try_for_each(|(path, mode, id)| write_file(repo, path, *mode, id).with_context(|| format!("writing {path}")))?;
     crate::lfs::after_checkout(repo, &lfs, &writes)?;
     for (path, mode, id) in &writes {
-        let (size, mtime) = match fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)) {
-            Ok(md) if *mode != Mode::Submodule => {
-                let (s, m, _) = stat_of(&md);
-                (s, m)
-            }
-            _ => (0, 0),
+        let entry = match fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)) {
+            Ok(md) if *mode != Mode::Submodule => Entry { mode: *mode, ..stat_of(&md).entry(id) },
+            _ => Entry { size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode: *mode, id: *id.as_bytes() },
         };
-        index.entries.insert(path.to_string(), Entry { size, mtime_ns: mtime, mode: *mode, id: *id.as_bytes() });
+        index.entries.insert(path.to_string(), entry);
     }
     for (path, mode, id) in skipped {
         // Outside the sparse checkout: recorded, not written.
-        index.entries.insert(path.to_string(), Entry { size: 0, mtime_ns: 0, mode, id: *id.as_bytes() });
+        index.entries.insert(path.to_string(), Entry { size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode, id: *id.as_bytes() });
     }
     Ok((writes.len(), removed))
 }
