@@ -109,7 +109,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse rebase --autosquash <rev>` | Fold `fixup! X` and `squash! X` commits into commit X |
 | `copse rebase -x <cmd> <rev>` | Run a command after each commit (e.g. the tests); if it fails, the rebase pauses there so you can fix it |
 | `copse rebase --continue` / `--skip` / `--abort` | Carry on after fixing conflicts, drop the conflicting commit, or undo the whole rebase |
-| `copse checkout <rev>` (`co`) | Switch to a branch, a commit id prefix, `origin/main`, or `HEAD~N`. A branch only the remote has (`origin/feature`) can be checked out as `feature`: copse makes the local branch from it, as git does. Refuses if you have uncommitted changes; `-f` discards them, but untracked files are always kept. A checkout happens completely or not at all: if an untracked or ignored file is in the way (inside a folder that has to become a file, or where a folder has to go), it's refused before anything changes, and the file is never removed for you. |
+| `copse checkout <rev>` (`co`) | Switch to a branch, a commit id prefix, `origin/main`, or `HEAD~N`. A branch only the remote has (`origin/feature`) can be checked out as `feature`: copse makes the local branch from it, as git does. Refuses if you have uncommitted changes; `-f` discards them, saving them as a stash first (`copse stash apply 0` brings them back), and untracked files are always kept. A checkout happens completely or not at all: if an untracked or ignored file is in the way (inside a folder that has to become a file, or where a folder has to go), it's refused before anything changes, and the file is never removed for you. |
 | `copse gc [--prune when]` | Pack all objects into one file (older versions as compact deltas) and remove unused objects once they're two weeks old |
 | `copse fsck` | Check that every object is intact and that everything branches, tags, stashes and the reflog need is there |
 | `copse clone <url> [dir] [--depth N] [--filter=blob:none] [--recurse-submodules]` | Copy a repository and check out its main branch. `--depth N` fetches only the newest N commits; `--filter=blob:none` fetches file contents only when needed (both copse remotes); `--recurse-submodules` checks submodules out too |
@@ -589,7 +589,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `rebase.sh` | 78 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 35 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
-| `safety.sh` | 47 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
+| `safety.sh` | 49 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 24 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 32 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |

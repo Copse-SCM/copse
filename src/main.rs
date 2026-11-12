@@ -548,7 +548,7 @@ enum Command {
     #[command(alias = "co")]
     Checkout {
         target: String,
-        /// Discard uncommitted changes to committed files (untracked files are kept)
+        /// Discard uncommitted changes to committed files (saved as a stash first; untracked files are kept)
         #[arg(short, long)]
         force: bool,
     },

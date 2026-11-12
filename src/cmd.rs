@@ -474,6 +474,13 @@ pub fn checkout(target: &str, force: bool) -> Result<()> {
 
     let target_files = flatten(&repo.store, &repo.read_commit(&commit_id)?.tree)?;
     let old_commit = repo.head_commit()?;
+    // --force discards edits to committed files, and new files the target has a file
+    // in place of (other new files stay as they are). Keep a copy first, as reset
+    // --hard does, so `copse stash apply` brings it back.
+    let lost = !ch.modified.is_empty() || !ch.deleted.is_empty() || ch.added.iter().any(|p| target_files.contains_key(p));
+    if lost && old_commit.is_some() {
+        crate::stash::backup(&repo, &format!("before checkout --force {target}"))?;
+    }
     let (written, removed) = apply_tree(&repo, &mut index, &files, &target_files, &merge_added)?;
     index.save(&repo.wt)?;
     if let Some(full) = &from_remote {

@@ -158,5 +158,15 @@ out=$(cps checkout third 2>&1) && fail "a checkout that needs a folder where an 
 [[ "$out" == *"x is in the way of x/y"* && $(cat x) == mine ]] && cps status | has "On branch main" && ok "so does an ignored file where a folder has to go" || fail "$out"
 cd ..
 
+echo "== checkout --force keeps a copy of what it discards"
+mkdir forced && cd forced && cps init >/dev/null && echo one > a && echo keep > b && cps commit -m one >/dev/null
+cps branch two >/dev/null && cps checkout two >/dev/null && echo two > a && echo theirs > n && cps commit -m two >/dev/null && cps checkout main >/dev/null
+echo edited > a && rm b && echo mine > n && echo scratch > u
+out=$(cps checkout -f two 2>&1) && [[ "$out" == *"stash 0"* && $(cat a) == two && $(cat n) == theirs && $(cat u) == scratch ]] || fail "line $LINENO: $out"
+rm u && cps checkout main >/dev/null && rm -f n && cps stash apply 0 >/dev/null && [[ $(cat a) == edited && ! -e b && $(cat n) == mine && $(cat u) == scratch ]] && ok "an edit, a deletion and a new file the target replaced all come back with stash apply" || fail "line $LINENO: a step before this check failed"
+cps reset --hard >/dev/null && cps stash drop 0 >/dev/null && cps stash drop 0 >/dev/null && rm -f n u && before=$(cps stash list | wc -l)
+echo scratch > u && cps checkout -f two >/dev/null && [[ $(cps stash list | wc -l) == "$before" && $(cat u) == scratch ]] && ok "untracked files it keeps don't make a stash" || fail "line $LINENO: a step before this check failed"
+cd ..
+
 echo
 echo "All $pass checks passed."
