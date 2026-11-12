@@ -145,5 +145,18 @@ printf 'cccc\n' > f && touch -t 202001010000 f
 cps status | has "Nothing changed" && ok "with core.trustctime = false the change time is ignored, as in git" || fail "line $LINENO: core.trustctime was ignored"
 cd ..
 
+echo "== a checkout blocked by a file copse doesn't track"
+mkdir blocked && cd blocked && cps init >/dev/null && echo a > a && echo z1 > z && cps commit -m main >/dev/null
+cps branch third >/dev/null && cps checkout third >/dev/null && mkdir x && echo y > x/y && cps commit -m third >/dev/null && cps checkout main >/dev/null
+cps branch other >/dev/null && cps checkout other >/dev/null && rm a && mkdir a && echo b > a/b && echo z2 > z && cps commit -m other >/dev/null
+printf '*.log\nx\n' > .copse/exclude && echo mine > a/notes.log
+out=$(cps checkout main 2>&1) && fail "a checkout that has to replace a folder holding an ignored file should be refused"
+[[ "$out" == *"a/notes.log is in the way of a"* && $(cat z) == z2 && -f a/b && -f a/notes.log ]] && cps status | has "Nothing changed" && ok "an ignored file inside a folder that must become a file stops the checkout before anything changes" || fail "$out"
+mv a/notes.log .. && cps checkout main >/dev/null && [[ $(cat a) == a && $(cat z) == z1 ]] && ok "with it moved away, the checkout goes through" || fail "line $LINENO: a step before this check failed"
+echo mine > x
+out=$(cps checkout third 2>&1) && fail "a checkout that needs a folder where an ignored file is should be refused"
+[[ "$out" == *"x is in the way of x/y"* && $(cat x) == mine ]] && cps status | has "On branch main" && ok "so does an ignored file where a folder has to go" || fail "$out"
+cd ..
+
 echo
 echo "All $pass checks passed."

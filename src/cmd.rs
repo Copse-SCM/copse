@@ -520,6 +520,28 @@ pub(crate) fn apply_tree(
         .filter(|p| !target_files.contains_key(*p) && current.contains_key(p.as_str()) && !absent.contains(p.as_str()))
         .cloned()
         .collect();
+
+    // Every file whose content or mode differs from the target.
+    let to_write: Vec<(&str, Mode, Id)> = target_files
+        .iter()
+        .filter(|(p, want)| current.get(p.as_str()) != Some(*want) && !off_disk(p))
+        .map(|(p, (mode, id))| (p.as_str(), *mode, *id))
+        .collect();
+
+    // Everything that can fail is done before the first file is touched, so a
+    // checkout either happens completely or leaves your files as they were: what's
+    // in the way of a write, then downloads.
+    check_way_clear(repo, &to_remove, &to_write)?;
+    // LFS contents it'll need, downloaded in one go (the rules come from what's
+    // being checked out, since its .gitattributes may not be on disk yet).
+    let lfs = crate::lfs::Attrs::for_files(repo, target_files);
+    crate::lfs::before_checkout(repo, &lfs, &to_write);
+    // A partial clone fetches the contents it's about to write in one go.
+    if repo.is_partial() {
+        let ids: Vec<Id> = to_write.iter().filter(|(_, m, _)| *m != Mode::Submodule).map(|(_, _, id)| *id).collect();
+        repo.store.prefetch(&ids)?;
+    }
+
     for path in &to_remove {
         let full = crate::objects::disk_path(&repo.root, path);
         if full.is_dir() && !fs::symlink_metadata(&full).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
@@ -539,21 +561,6 @@ pub(crate) fn apply_tree(
         }
     }
 
-    // Write every file whose content or mode differs from the target, in parallel.
-    let to_write: Vec<(&str, Mode, Id)> = target_files
-        .iter()
-        .filter(|(p, want)| current.get(p.as_str()) != Some(*want) && !off_disk(p))
-        .map(|(p, (mode, id))| (p.as_str(), *mode, *id))
-        .collect();
-    // LFS contents it'll need, downloaded in one go (the rules come from what's
-    // being checked out, since its .gitattributes may not be on disk yet).
-    let lfs = crate::lfs::Attrs::for_files(repo, target_files);
-    crate::lfs::before_checkout(repo, &lfs, &to_write);
-    // A partial clone fetches the contents it's about to write in one go.
-    if repo.is_partial() {
-        let ids: Vec<Id> = to_write.iter().filter(|(_, m, _)| *m != Mode::Submodule).map(|(_, _, id)| *id).collect();
-        repo.store.prefetch(&ids)?;
-    }
     // Files and folders first, in parallel; symlinks last, one at a time. A link
     // made while another thread is writing could otherwise appear on a path that
     // thread has already checked (`A` -> elsewhere and `a/x` on a disk that ignores
@@ -590,6 +597,71 @@ pub(crate) fn apply_tree(
         .collect();
     index.entries = entries?.into_iter().collect();
     Ok((to_write.len(), to_remove.len()))
+}
+
+/// Before a checkout changes anything: refuse if something copse doesn't track
+/// would block a write once the files it removes are gone, so it never stops
+/// halfway. That's an untracked or ignored file (or symlink) where a folder has to
+/// go (`a` when writing `a/b`), or one inside a folder that has to become a file
+/// (`a/notes.log` when writing the file `a`). It isn't removed for you: ignored
+/// files can still be work you want, and copse never throws work away unasked.
+fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_write: &[(&str, Mode, Id)]) -> Result<()> {
+    let refuse = |blocker: &str, path: &str| -> Result<()> {
+        bail!("{blocker} is in the way of {path}, and copse doesn't track it (it may be ignored); move or delete it and try again. Nothing was changed")
+    };
+    // The folders files go into, each checked once, outermost first: each must be
+    // a real folder, not there yet, or a committed file that's removed first. Below
+    // one that isn't a folder now, nothing is there to check.
+    let mut folders: BTreeMap<&str, &str> = BTreeMap::new(); // folder -> a file written in it
+    for &(path, _, _) in to_write {
+        for (i, _) in path.match_indices('/') {
+            folders.entry(&path[..i]).or_insert(path);
+        }
+    }
+    let mut empty: HashSet<&str> = HashSet::new();
+    for (&folder, &path) in &folders {
+        if folder.rsplit_once('/').is_some_and(|(parent, _)| empty.contains(parent)) {
+            empty.insert(folder);
+            continue;
+        }
+        match fs::symlink_metadata(crate::objects::disk_path(&repo.root, folder)) {
+            Ok(md) if md.is_dir() => {}
+            Ok(_) if to_remove.contains(folder) => {
+                empty.insert(folder);
+            }
+            Ok(_) => return refuse(folder, path),
+            Err(_) => {
+                empty.insert(folder);
+            }
+        }
+    }
+    // A folder where a file goes is removed only if everything in it is a
+    // committed file that's removed.
+    to_write.par_iter().try_for_each(|&(path, mode, _)| -> Result<()> {
+        if mode == Mode::Submodule || path.rsplit_once('/').is_some_and(|(parent, _)| empty.contains(parent)) {
+            return Ok(());
+        }
+        let full = crate::objects::disk_path(&repo.root, path);
+        if !fs::symlink_metadata(&full).is_ok_and(|md| md.is_dir()) {
+            return Ok(());
+        }
+        let mut stack = vec![full];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+                let entry = entry?;
+                let at = entry.path();
+                if entry.file_type()?.is_dir() {
+                    stack.push(at);
+                    continue;
+                }
+                let rel = crate::objects::path_from_disk(at.strip_prefix(&repo.root).unwrap_or(&at));
+                if !to_remove.contains(&rel) {
+                    return refuse(&rel, path);
+                }
+            }
+        }
+        Ok(())
+    })
 }
 
 /// A path as a disk that ignores case (macOS, Windows, some Linux mounts) sees it,

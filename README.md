@@ -71,7 +71,7 @@ copse                         # the interactive screen
 
 ## Status
 
-The first release is 2026.11.0, for people who like trying new tools. 1,056 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.
+The first release is 2026.11.0, for people who like trying new tools. 1,059 end-to-end checks and a randomized stress test against git run on every push. It's still young, though, so keep a git clone of anything you can't afford to lose.
 
 ## License
 
