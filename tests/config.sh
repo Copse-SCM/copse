@@ -53,6 +53,32 @@ printf '# my notes\n' | cat - .copse/config > t && mv t .copse/config && cps con
 head -1 .copse/config | has "# my notes" && ok "editing keeps comments and everything else in the file" || fail "line $LINENO: a step before this check failed"
 cd .. && expect_fail "outside a repository, settings need --global" "use --global" cps config user.name x && cd r
 
+echo "== settings files read as git reads them"
+cp .copse/config ../config.saved && cat >> .copse/config <<'CFG'
+[core]
+	excludesFile = ~/myignore   # global ignores
+	editor = "vim -f" ; quoted, then a comment
+	hooksPath = a" b "c
+[user] name = Ada  Lovelace
+	email = "  spaced@example.com  "
+[gpg "ssh"]
+	allowedSignersFile = ~/signers
+[alias]
+	long = log \
+	  --oneline
+	tabbed = "a\tb\\c\"d"
+	flag
+CFG
+diffs=""
+for k in core.excludesfile core.editor core.hookspath user.name user.email gpg.ssh.allowedsignersfile alias.long alias.tabbed; do
+  [[ "$(cps config "$k")" == "$(git config --file .copse/config "$k")" ]] || diffs+=" $k"
+done
+[[ -z "$diffs" ]] && ok "comments after values, quotes anywhere, escapes, continued lines, [section \"sub\"] and a setting beside its section all read as git reads them" || fail "differ from git:$diffs"
+same "$(cps config alias.flag) $(git config --file .copse/config --bool alias.flag)" "true true" "a key on its own means true"
+cps config core.editor 'nano -w # really' >/dev/null && cps config alias.long "two words" >/dev/null && cps config gpg.ssh.allowedsignersfile "/x" >/dev/null
+same "$(cps config core.editor)|$(git config --file .copse/config core.editor)|$(cps config alias.long)|$(git config --file .copse/config alias.long)|$(git config --file .copse/config gpg.ssh.allowedsignersfile)" "nano -w # really|nano -w # really|two words|two words|/x" "and what copse config writes (replacing a continued value whole) reads back the same in git"
+cp ../config.saved .copse/config
+
 echo "== aliases"
 cps config alias.s status >/dev/null && cps config alias.last "log -n 1 --oneline" >/dev/null
 same "$(cps s | head -1)" "$(cps status | head -1)" "an alias runs the command it stands for"

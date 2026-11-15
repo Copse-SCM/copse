@@ -13,7 +13,8 @@
 //!       excludesFile = ~/.config/copse/ignore
 //!       hooksPath = .githooks
 //!
-//! Section and key names ignore case; values are kept as written. `copse config`
+//! Section and key names ignore case (a subsection, as in `[gpg "ssh"]`, doesn't);
+//! values are read by git's rules (see `parse`). `copse config`
 //! reads and writes them.
 
 use crate::cmd::paint;
@@ -73,31 +74,130 @@ fn repo_path() -> Option<PathBuf> {
     Repo::find_any().ok().map(|r| r.dir.join("config"))
 }
 
-/// One parsed line of a config file.
+/// One item in a config file, and the lines it takes up.
 enum Line {
+    /// `[core]` -> "core"; `[gpg "ssh"]` -> "gpg.ssh" (the subsection keeps its case).
     Section(String),
     Entry { key: String, value: String },
-    Other,
 }
 
-fn parse_line(raw: &str) -> Line {
-    let t = raw.trim();
-    if t.is_empty() || t.starts_with('#') || t.starts_with(';') {
-        return Line::Other;
+/// A config file's sections and settings, read by git's rules: `#` and `;` start
+/// a comment outside quotes; a value may be quoted in whole or in part, with
+/// `\"`, `\\`, `\n`, `\t` and `\b` escapes; a `\` at the end of a line carries
+/// the value on to the next; whitespace around a value is dropped unless quoted;
+/// a key on its own means true; a setting can follow a section on its line.
+/// Each item comes with the lines it spans.
+fn parse(text: &str) -> Vec<(std::ops::Range<usize>, Line)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let start = i;
+        let mut rest = lines[i].trim_start();
+        if rest.starts_with('[') {
+            let Some((name, after)) = section_header(rest) else {
+                i += 1; // malformed: skipped
+                continue;
+            };
+            out.push((start..start + 1, Line::Section(name)));
+            rest = after.trim_start();
+        }
+        if rest.is_empty() || rest.starts_with('#') || rest.starts_with(';') {
+            i += 1;
+            continue;
+        }
+        let key_len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).unwrap_or(rest.len());
+        if key_len == 0 {
+            i += 1; // not a setting: skipped
+            continue;
+        }
+        let key = rest[..key_len].to_ascii_lowercase();
+        let after_key = rest[key_len..].trim_start();
+        let value = match after_key.strip_prefix('=') {
+            Some(v) => {
+                let (value, last) = parse_value(&lines, i, v);
+                i = last;
+                value
+            }
+            None => "true".into(), // a key on its own
+        };
+        out.push((start..i + 1, Line::Entry { key, value }));
+        i += 1;
     }
-    if let Some(inner) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        return Line::Section(inner.trim().to_ascii_lowercase());
-    }
-    match t.split_once('=') {
-        Some((k, v)) => Line::Entry { key: k.trim().to_ascii_lowercase(), value: unquote(v.trim()) },
-        None => Line::Entry { key: t.to_ascii_lowercase(), value: "true".into() }, // a bare key means true, as in git
-    }
+    out
 }
 
-fn unquote(v: &str) -> String {
-    match v.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
-        Some(inner) => inner.replace("\\\"", "\"").replace("\\\\", "\\"),
-        None => v.to_string(),
+/// `[name]` or `[name "Sub"]` at the start of `t`: (section, the rest of the line).
+fn section_header(t: &str) -> Option<(String, &str)> {
+    let inner = &t[1..];
+    let close = inner.find(']')?;
+    let head = &inner[..close];
+    let name = match head.split_once('"') {
+        Some((section, sub)) => {
+            let sub = sub.strip_suffix('"')?.replace("\\\"", "\"").replace("\\\\", "\\");
+            format!("{}.{sub}", section.trim().to_ascii_lowercase())
+        }
+        None => head.trim().to_ascii_lowercase(),
+    };
+    Some((name, &inner[close + 1..]))
+}
+
+/// A value starting at `first` (the text after `=` on line `at`), following `\`
+/// line continuations. Returns it and the index of the line it ends on.
+fn parse_value(lines: &[&str], mut at: usize, first: &str) -> (String, usize) {
+    let (mut out, mut gap) = (String::new(), String::new());
+    let mut quoted = false;
+    let mut chars: Vec<char> = first.chars().collect();
+    let mut k = 0;
+    loop {
+        let Some(&c) = chars.get(k) else { break };
+        k += 1;
+        match c {
+            '\\' => match chars.get(k) {
+                None if at + 1 < lines.len() => {
+                    at += 1; // continued on the next line
+                    chars = lines[at].chars().collect();
+                    k = 0;
+                    continue;
+                }
+                None => break,
+                Some(&e) => {
+                    k += 1;
+                    out.push_str(&std::mem::take(&mut gap));
+                    out.push(match e {
+                        'n' => '\n',
+                        't' => '\t',
+                        'b' => '\x08',
+                        other => other, // \" and \\ (and anything else, as written)
+                    });
+                }
+            },
+            '"' => {
+                out.push_str(&std::mem::take(&mut gap));
+                quoted = !quoted;
+            }
+            '#' | ';' if !quoted => break,
+            c if c.is_whitespace() && !quoted => {
+                if !out.is_empty() {
+                    gap.push(c); // kept only if something follows
+                }
+            }
+            c => {
+                out.push_str(&std::mem::take(&mut gap));
+                out.push(c);
+            }
+        }
+    }
+    (out, at)
+}
+
+/// A setting's name as stored: section and key in lower case, a subsection as written.
+fn normalize(key: &str) -> String {
+    match (key.split_once('.'), key.rsplit_once('.')) {
+        (Some((section, _)), Some((middle, name))) if middle.len() > section.len() => {
+            format!("{}{}.{}", section.to_ascii_lowercase(), &middle[section.len()..], name.to_ascii_lowercase())
+        }
+        _ => key.to_ascii_lowercase(),
     }
 }
 
@@ -106,8 +206,8 @@ fn read_file(path: &Path) -> Vec<(String, String)> {
     let Ok(text) = fs::read_to_string(path) else { return Vec::new() };
     let mut section = String::new();
     let mut out = Vec::new();
-    for raw in text.lines() {
-        match parse_line(raw) {
+    for (_, item) in parse(&text) {
+        match item {
             Line::Section(s) => section = s,
             Line::Entry { key, value } if !section.is_empty() => out.push((format!("{section}.{key}"), value)),
             _ => {}
@@ -119,7 +219,7 @@ fn read_file(path: &Path) -> Vec<(String, String)> {
 /// A setting's value: the repository's file, then the global one (the last
 /// occurrence in a file wins, as in git).
 pub fn get(key: &str) -> Option<String> {
-    let key = key.to_ascii_lowercase();
+    let key = normalize(key);
     for path in [repo_path(), global_path()].into_iter().flatten() {
         if let Some((_, v)) = read_file(&path).into_iter().filter(|(k, _)| *k == key).last() {
             return Some(v);
@@ -145,26 +245,29 @@ pub fn aliases() -> Vec<(String, String)> {
 /// Set (or with `value` None, remove) `key` in the file at `path`, keeping
 /// everything else in it, comments included.
 fn write_key(path: &Path, key: &str, value: Option<&str>) -> Result<bool> {
+    let key = normalize(key);
     let (section, name) = key.rsplit_once('.').with_context(|| format!("{key:?} needs a section, like user.name"))?;
-    let (section, name) = (section.to_ascii_lowercase(), name.to_ascii_lowercase());
+    let (section, name) = (section.to_string(), name.to_string());
     let text = fs::read_to_string(path).unwrap_or_default();
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let mut current = String::new();
     let mut section_end: Option<usize> = None; // where to add a new key in an existing section
-    let mut found = Vec::new();
-    for (i, raw) in lines.iter().enumerate() {
-        match parse_line(raw) {
+    let mut found: Vec<std::ops::Range<usize>> = Vec::new();
+    for (span, item) in parse(&text) {
+        match item {
             Line::Section(s) => current = s,
-            Line::Entry { key: k, .. } if current == section && k == name => found.push(i),
+            Line::Entry { key: k, .. } if current == section && k == name => found.push(span.clone()),
             _ => {}
         }
-        if current == section && !raw.trim().is_empty() {
-            section_end = Some(i + 1);
+        if current == section {
+            section_end = Some(span.end);
         }
     }
+    // Written so git (and copse) read back exactly this value.
     let quoted = |v: &str| {
-        if v.starts_with(' ') || v.ends_with(' ') || v.contains('#') || v.contains(';') || v.contains('"') {
-            format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+        let escaped = v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t");
+        if v.starts_with(char::is_whitespace) || v.ends_with(char::is_whitespace) || v.contains(['#', ';']) || escaped != v {
+            format!("\"{escaped}\"")
         } else {
             v.to_string()
         }
@@ -172,23 +275,26 @@ fn write_key(path: &Path, key: &str, value: Option<&str>) -> Result<bool> {
     let changed = match value {
         Some(v) => {
             let line = format!("\t{name} = {}", quoted(v));
-            if let Some(&last) = found.last() {
-                // Replace the one that counts; drop earlier duplicates.
-                lines[last] = line;
-                for &i in found.iter().rev().skip(1) {
-                    lines.remove(i);
+            if let Some(last) = found.pop() {
+                // Replace the one that counts (all its lines); drop earlier duplicates.
+                lines.splice(last, [line]);
+                for span in found.iter().rev() {
+                    lines.drain(span.clone());
                 }
             } else if let Some(end) = section_end {
                 lines.insert(end, line);
             } else {
-                lines.push(format!("[{section}]"));
+                lines.push(match section.split_once('.') {
+                    Some((s, sub)) => format!("[{s} \"{}\"]", sub.replace('\\', "\\\\").replace('"', "\\\"")),
+                    None => format!("[{section}]"),
+                });
                 lines.push(line);
             }
             true
         }
         None => {
-            for &i in found.iter().rev() {
-                lines.remove(i);
+            for span in found.iter().rev() {
+                lines.drain(span.clone());
             }
             !found.is_empty()
         }
