@@ -598,7 +598,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `security.sh` | 24 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 36 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |
-| `tui.sh` | 76 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
+| `tui.sh` | 78 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |
 | `workflow.sh` | 82 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
 

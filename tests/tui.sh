@@ -54,6 +54,9 @@ echo temp > temp.txt && ui "x,y" >/dev/null && [[ ! -e temp.txt ]] && ok "x on a
 echo wip > wip.txt && ui "s,y" >/dev/null && [[ ! -e wip.txt ]] && cps stash show | has "wip.txt" && ok "s stashes everything" || fail "line $LINENO: a step before this check failed"
 cps stash pop >/dev/null && rm -f wip.txt
 echo a > a.txt && echo b > b.txt && ui "a,c,text:Both,enter" >/dev/null && same "$(cps show --stat | grep -c '|')" "2" "a picks everything" || fail "line $LINENO: a step before this check failed"
+echo new > ./--amend && echo changed > a.txt
+ui "space,c,text:Odd name,enter" >/dev/null && same "$(titles -n 2) | $(cps show --stat | grep '|' | awk '{print $1}') | $(cps status | grep -E '^  [AMD] ' | sed 's/^ *//')" "Odd name,Both | --amend | M a.txt" "a picked file named like an option (--amend) is committed as a file, not taken as one" || fail "line $LINENO: a step before this check failed"
+cps restore a.txt >/dev/null && echo n > ./-n && ui "x,y" >/dev/null && [[ ! -e ./-n ]] && ok "and x deletes a new file named like one" || fail "line $LINENO: a step before this check failed"
 
 echo "== Changes: a description under the summary"
 echo c > c.txt

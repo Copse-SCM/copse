@@ -364,7 +364,7 @@ impl App {
                     self.message = "No branch made: the name was empty.".into();
                     return;
                 }
-                let mut args = vec!["branch".to_string(), name.to_string()];
+                let mut args = vec!["branch".to_string(), "--".into(), name.to_string()];
                 args.extend(at);
                 self.run(&args);
             }
@@ -384,9 +384,14 @@ impl App {
             msg += "\n\n";
             msg += body.trim_start_matches('\n');
         }
-        let mut args = vec!["commit".to_string(), "-m".into(), msg];
+        // `--message=` keeps a message starting with "-" whole, and `--` before the
+        // paths keeps a file named like an option (`--amend`) a file.
+        let mut args = vec!["commit".to_string(), format!("--message={msg}")];
         if self.hunk_picks.is_empty() {
-            args.extend(self.picked.iter().cloned());
+            if !self.picked.is_empty() {
+                args.push("--".into());
+                args.extend(self.picked.iter().cloned());
+            }
         } else {
             for p in &self.picked {
                 args.push(format!("--pick=*:{p}"));
@@ -656,9 +661,9 @@ impl App {
                         if let Some(ch) = cur {
                             // New files are removed with clean (which keeps a backup); others restored.
                             let (q, args) = if ch.kind == 'A' {
-                                (format!("Delete the new file {}? (a backup is kept as a stash)", ch.path), vec!["clean", "-f", ch.path.as_str()])
+                                (format!("Delete the new file {}? (a backup is kept as a stash)", ch.path), vec!["clean", "-f", "--", ch.path.as_str()])
                             } else {
-                                (format!("Discard your changes to {}? (a backup is kept as a stash)", ch.path), vec!["restore", ch.path.as_str()])
+                                (format!("Discard your changes to {}? (a backup is kept as a stash)", ch.path), vec!["restore", "--", ch.path.as_str()])
                             };
                             let args: Vec<String> = args.into_iter().map(String::from).collect();
                             self.mode = Mode::Confirm { question: q, then: Pending::Run(args) };
