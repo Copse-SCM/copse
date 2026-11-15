@@ -914,6 +914,20 @@ fn merge_file(
 ) -> Result<((Mode, Id), Option<&'static str>)> {
     // Mode: take theirs if only theirs changed it, otherwise keep ours.
     let mode = if base.map_or(false, |(bm, _)| bm == o_mode) { t_mode } else { o_mode };
+    // Ordinary files where only one side changed the contents (the other changed
+    // just the mode, say `chmod +x`): that side's contents, with the merged mode.
+    // Binary files included: there's nothing to merge line by line.
+    if matches!(o_mode, Mode::File | Mode::Exec) && matches!(t_mode, Mode::File | Mode::Exec) {
+        let content = match base {
+            _ if o_id == t_id => Some(o_id),
+            Some((_, b)) if b == o_id => Some(t_id),
+            Some((_, b)) if b == t_id => Some(o_id),
+            _ => None,
+        };
+        if let Some(id) = content {
+            return Ok(((mode, id), None));
+        }
+    }
     // -X ours / theirs settle what can't be merged line by line, too.
     let whole = match options().favor {
         Favor::Ours => Some((o_mode, o_id)),

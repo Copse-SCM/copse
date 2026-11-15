@@ -40,6 +40,9 @@ ENV = dict(
     GIT_COMMITTER_NAME="Fuzz", GIT_COMMITTER_EMAIL="f@example.com",
     COPSE_AUTHOR="Fuzz", COPSE_EMAIL="f@example.com", COPSE_FSYNC="0", COPSE_EDITOR="true",
     HOME=os.path.join(WORK, "home"),
+    # No background housekeeping: its temporary files could appear mid-comparison.
+    GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="gc.auto", GIT_CONFIG_VALUE_0="0",
+    GIT_CONFIG_KEY_1="maintenance.auto", GIT_CONFIG_VALUE_1="false",
 )
 WORDS = ["alpha", "beta", "gamma", "delta", "omega", "lambda", "sigma", "kappa", "theta", "zeta"]
 
@@ -144,7 +147,9 @@ def setup(rng, rnd):
 def commit(tree, g, c, msg):
     tree.write(g)
     sh(["git", "add", "-A"], g)
-    sh(["git", "commit", "-q", "--allow-empty", "-m", msg], g)
+    # A side whose random edits cancel out has nothing to commit. copse makes no
+    # empty commits, so git mustn't either, or the two histories would differ.
+    sh(["git", "commit", "-q", "-m", msg], g, check=False)
     tree.write(c)
     sh([COPSE, "commit", "-m", msg], c, check=False)  # "Nothing to commit" is fine
 
@@ -222,8 +227,10 @@ def run_round(rnd, rng, stats):
             g_ok = True
         r = sh([COPSE, "cherry-pick", "theirs"], c, check=False)
         c_ok = r.returncode == 0 and "Conflict" not in r.stdout
+    different_before = stats["different"]
     compare(kind, rnd, g_ok, c_ok, g, c, stats, detail, git_out)
-    if g_ok and c_ok:
+    if g_ok and c_ok and stats["different"] == different_before:
+        # Kept when the results differ, so the folders the report names are there.
         shutil.rmtree(g)
         shutil.rmtree(c)
 

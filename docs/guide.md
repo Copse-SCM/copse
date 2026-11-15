@@ -143,7 +143,7 @@ copse honours `.gitignore` files and also reads `.copseignore`, which uses the s
   >>>>>>> feature
   ```
   Edit the files, then run `copse commit`; the message defaults to "Merge feature into main". `copse status` lists the files that still have markers, and `commit` refuses until they're gone. `copse merge --abort` puts everything back.
-- **Files that can't be merged line by line:** binary files and symlinks changed on both sides, and files deleted on one side but edited on the other, are reported as conflicts. copse keeps one version (yours, or the edited one) for you to check.
+- **Files that can't be merged line by line:** binary files and symlinks changed on both sides, and files deleted on one side but edited on the other, are reported as conflicts. (A file whose contents changed on one side and permissions on the other, such as `chmod +x`, isn't a conflict: it gets both, binary or not.) copse keeps one version (yours, or the edited one) for you to check.
 - **Renames are followed**, as git follows them, in merge, rebase, cherry-pick, revert and stash. A file renamed on one side and edited on the other ends up renamed with both changes. A rename counts when the content is identical or at least 50% the same.
   - Renamed differently on each side: both names get both sides' changes, and it's reported as a conflict.
   - Renamed on one side and deleted on the other: the renamed file is kept, and it's reported.
@@ -600,7 +600,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `tags.sh` | 20 | Local tags |
 | `tui.sh` | 76 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |
-| `workflow.sh` | 76 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
+| `workflow.sh` | 78 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
 
 `cargo test` runs unit tests for merging, hunks, the rebase list, timezones and git's formats (checked against hashes real git produces). `tests/fuzz.py` is a randomized stress test: it builds the same random histories in git and copse (edits, inserts, deletions, new files, renames, folder moves), then merges, rebases and cherry-picks in both and compares the results file by file. Run `tests/fuzz.py 500 <seed>`; 2,000 rounds across eight seeds match git exactly.
 
