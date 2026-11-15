@@ -79,6 +79,9 @@ enum Line {
     /// `[core]` -> "core"; `[gpg "ssh"]` -> "gpg.ssh" (the subsection keeps its case).
     Section(String),
     Entry { key: String, value: String },
+    /// A line that's neither (git refuses the file over one; copse skips it, with
+    /// a warning, rather than stop every command).
+    Unreadable,
 }
 
 /// A config file's sections and settings, read by git's rules: `#` and `;` start
@@ -96,7 +99,8 @@ fn parse(text: &str) -> Vec<(std::ops::Range<usize>, Line)> {
         let mut rest = lines[i].trim_start();
         if rest.starts_with('[') {
             let Some((name, after)) = section_header(rest) else {
-                i += 1; // malformed: skipped
+                out.push((start..start + 1, Line::Unreadable));
+                i += 1;
                 continue;
             };
             out.push((start..start + 1, Line::Section(name)));
@@ -107,19 +111,21 @@ fn parse(text: &str) -> Vec<(std::ops::Range<usize>, Line)> {
             continue;
         }
         let key_len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).unwrap_or(rest.len());
-        if key_len == 0 {
-            i += 1; // not a setting: skipped
-            continue;
-        }
         let key = rest[..key_len].to_ascii_lowercase();
         let after_key = rest[key_len..].trim_start();
         let value = match after_key.strip_prefix('=') {
-            Some(v) => {
+            Some(v) if key_len > 0 => {
                 let (value, last) = parse_value(&lines, i, v);
                 i = last;
                 value
             }
-            None => "true".into(), // a key on its own
+            // A key on its own means true.
+            None if key_len > 0 && (after_key.is_empty() || after_key.starts_with(['#', ';'])) => "true".into(),
+            _ => {
+                out.push((start..start + 1, Line::Unreadable));
+                i += 1;
+                continue;
+            }
         };
         out.push((start..i + 1, Line::Entry { key, value }));
         i += 1;
@@ -130,16 +136,25 @@ fn parse(text: &str) -> Vec<(std::ops::Range<usize>, Line)> {
 /// `[name]` or `[name "Sub"]` at the start of `t`: (section, the rest of the line).
 fn section_header(t: &str) -> Option<(String, &str)> {
     let inner = &t[1..];
-    let close = inner.find(']')?;
-    let head = &inner[..close];
-    let name = match head.split_once('"') {
-        Some((section, sub)) => {
-            let sub = sub.strip_suffix('"')?.replace("\\\"", "\"").replace("\\\\", "\\");
-            format!("{}.{sub}", section.trim().to_ascii_lowercase())
+    match inner.find(['"', ']'])? {
+        // `[section "sub"]`: the subsection may hold `]` (branch names can), so
+        // the header ends at the `]` after its closing quote.
+        q if inner.as_bytes()[q] == b'"' => {
+            let section = inner[..q].trim().to_ascii_lowercase();
+            let mut sub = String::new();
+            let mut chars = inner[q + 1..].char_indices();
+            let end = loop {
+                match chars.next()? {
+                    (_, '\\') => sub.push(chars.next()?.1),
+                    (k, '"') => break q + 1 + k,
+                    (_, c) => sub.push(c),
+                }
+            };
+            let rest = inner[end + 1..].trim_start().strip_prefix(']')?;
+            Some((format!("{section}.{sub}"), rest))
         }
-        None => head.trim().to_ascii_lowercase(),
-    };
-    Some((name, &inner[close + 1..]))
+        close => Some((inner[..close].trim().to_ascii_lowercase(), &inner[close + 1..])),
+    }
 }
 
 /// A value starting at `first` (the text after `=` on line `at`), following `\`
@@ -164,12 +179,18 @@ fn parse_value(lines: &[&str], mut at: usize, first: &str) -> (String, usize) {
                 Some(&e) => {
                     k += 1;
                     out.push_str(&std::mem::take(&mut gap));
-                    out.push(match e {
-                        'n' => '\n',
-                        't' => '\t',
-                        'b' => '\x08',
-                        other => other, // \" and \\ (and anything else, as written)
-                    });
+                    match e {
+                        'n' => out.push('\n'),
+                        't' => out.push('\t'),
+                        'b' => out.push('\x08'),
+                        '"' | '\\' => out.push(e),
+                        // Not an escape git knows (git refuses the file): kept as
+                        // written, so `C:\Users` from an older copse still reads so.
+                        other => {
+                            out.push('\\');
+                            out.push(other);
+                        }
+                    }
                 }
             },
             '"' => {
@@ -206,14 +227,25 @@ fn read_file(path: &Path) -> Vec<(String, String)> {
     let Ok(text) = fs::read_to_string(path) else { return Vec::new() };
     let mut section = String::new();
     let mut out = Vec::new();
-    for (_, item) in parse(&text) {
+    for (span, item) in parse(&text) {
         match item {
             Line::Section(s) => section = s,
             Line::Entry { key, value } if !section.is_empty() => out.push((format!("{section}.{key}"), value)),
+            Line::Unreadable => warn_once(path, span.start + 1),
             _ => {}
         }
     }
     out
+}
+
+/// One warning per unreadable line per run (settings are read many times).
+fn warn_once(path: &Path, line: usize) {
+    static SEEN: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap();
+    if !seen.iter().any(|(p, l)| p == path && *l == line) {
+        seen.push((path.to_path_buf(), line));
+        eprintln!("copse: warning: {} line {line} isn't a setting or a [section]; it's ignored", path.display());
+    }
 }
 
 /// A setting's value: the repository's file, then the global one (the last
@@ -253,9 +285,13 @@ fn write_key(path: &Path, key: &str, value: Option<&str>) -> Result<bool> {
     let mut current = String::new();
     let mut section_end: Option<usize> = None; // where to add a new key in an existing section
     let mut found: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut headers: Vec<usize> = Vec::new();
     for (span, item) in parse(&text) {
         match item {
-            Line::Section(s) => current = s,
+            Line::Section(s) => {
+                current = s;
+                headers.push(span.start);
+            }
             Line::Entry { key: k, .. } if current == section && k == name => found.push(span.clone()),
             _ => {}
         }
@@ -272,6 +308,26 @@ fn write_key(path: &Path, key: &str, value: Option<&str>) -> Result<bool> {
             v.to_string()
         }
     };
+    // A setting written on its section's line (`[user] name = x`): the header is
+    // kept on a line of its own, and only what followed it counts as the setting.
+    // (Top to bottom: each line inserted moves everything after it down one.)
+    let mut shift = 0;
+    let mut found: Vec<std::ops::Range<usize>> = found
+        .into_iter()
+        .map(|span| {
+            let span = span.start + shift..span.end + shift;
+            if headers.contains(&(span.start - shift)) {
+                let line = lines[span.start].clone();
+                if let Some((_, after)) = section_header(line.trim_start()) {
+                    lines[span.start] = line[..line.len() - after.len()].to_string();
+                    lines.insert(span.start + 1, String::new()); // where the setting was
+                    shift += 1;
+                    return span.start + 1..span.end + 1;
+                }
+            }
+            span
+        })
+        .collect();
     let changed = match value {
         Some(v) => {
             let line = format!("\t{name} = {}", quoted(v));
@@ -381,7 +437,8 @@ pub fn config(args: ConfigArgs) -> Result<()> {
             println!("Set {key} = {v}{}", if args.global { " (for every repository)" } else { "" });
         }
         None => {
-            let found = if args.global { global_path().and_then(|p| read_file(&p).into_iter().filter(|(k, _)| *k == lower).last().map(|(_, v)| v)) } else { get(key) };
+            let wanted = normalize(key);
+            let found = if args.global { global_path().and_then(|p| read_file(&p).into_iter().filter(|(k, _)| *k == wanted).last().map(|(_, v)| v)) } else { get(key) };
             match found {
                 Some(v) => println!("{v}"),
                 None => std::process::exit(1), // unset, like `git config KEY`

@@ -212,7 +212,7 @@ copse uses `$COPSE_EDITOR`, then `$VISUAL`, then `$EDITOR`, then `vi`. Editors t
 
 ## Settings, aliases and hooks
 
-Settings live in `.copse/config` for one repository and `~/.config/copse/config` for all of them; the repository's file wins. The layout is the same as git's, read by git's rules (comments after a value, quotes anywhere in one, `\t`-style escapes, lines continued with `\`, `[gpg "ssh"]` sections), so a value means the same to copse as to git. `copse config` edits both files without disturbing anything else in them:
+Settings live in `.copse/config` for one repository and `~/.config/copse/config` for all of them; the repository's file wins. The layout is the same as git's, read by git's rules (comments after a value, quotes anywhere in one, `\t`-style escapes, lines continued with `\`, `[gpg "ssh"]` sections), so a value means the same to copse as to git. Two things git refuses a file over are read leniently instead: a backslash before a letter that isn't an escape is kept as it is (older copse wrote paths like `C:\Users` that way), and a line that's neither a setting nor a `[section]` is skipped with a warning. `copse config` edits both files without disturbing anything else in them:
 
 ```bash
 copse config --global user.name "Ada Lovelace"
@@ -583,7 +583,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `branches.sh` | 56 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
 | `bridge.sh` | 52 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
 | `commit.sh` | 64 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
-| `config.sh` | 59 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
+| `config.sh` | 65 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 30 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
 | `github.sh` | 139 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |

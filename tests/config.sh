@@ -78,6 +78,17 @@ same "$(cps config alias.flag) $(git config --file .copse/config --bool alias.fl
 cps config core.editor 'nano -w # really' >/dev/null && cps config alias.long "two words" >/dev/null && cps config gpg.ssh.allowedsignersfile "/x" >/dev/null
 same "$(cps config core.editor)|$(git config --file .copse/config core.editor)|$(cps config alias.long)|$(git config --file .copse/config alias.long)|$(git config --file .copse/config gpg.ssh.allowedsignersfile)" "nano -w # really|nano -w # really|two words|two words|/x" "and what copse config writes (replacing a continued value whole) reads back the same in git"
 cp ../config.saved .copse/config
+printf '[user] name = Old\n\temail = a@b.c\n[branch "a]b"]\n\tname = Evil\n[remote "Origin"]\n\turl = x\n' >> .copse/config
+same "$(cps config user.name)|$(git config --file .copse/config user.name)|$(cps config branch.a]b.name)|$(git config --file .copse/config 'branch.a]b.name')" "Old|Old|Evil|Evil" "a ] inside a quoted [section \"name\"] doesn't end it early (git reads it the same)"
+cps config user.name New >/dev/null && same "$(cps config user.email)|$(git config --file .copse/config user.email)|$(git config --file .copse/config user.name)" "a@b.c|a@b.c|New" "changing a setting written beside its [section] keeps the section (and the rest of it)" || fail "line $LINENO: a step before this check failed"
+cps config --unset user.name >/dev/null && same "$(cps config user.email)|$(git config --file .copse/config user.email)" "a@b.c|a@b.c" "and so does removing it" || fail "line $LINENO: a step before this check failed"
+cp ../config.saved .copse/config
+printf '[core]\n\texcludesFile = C:\\Users\\me\\ignore\n[user]\n\tname: Ada\n\temail = ada@ex.com\n' >> .copse/config
+same "$(cps config core.excludesfile 2>/dev/null)" 'C:\Users\me\ignore' "a backslash that isn't an escape is kept, so values written by older copse read as they were" 
+out=$(cps config user.email 2>&1); [[ "$out" == *"ada@ex.com"* && "$out" == *"line"*"isn't a setting"* && "$(cps config user.name 2>/dev/null)" != true ]] && ok "a line that isn't a setting is ignored with a warning, not read as \"true\"" || fail "line $LINENO: $out"
+cp ../config.saved .copse/config
+mkdir -p "$HOME/.config/copse" && printf '[remote "Origin"]\n\turl = global-x\n' >> "$HOME/.config/copse/config"
+same "$(cps config --global remote.Origin.url)" "global-x" "--global finds a [section \"Sub\"] with capitals too"
 
 echo "== aliases"
 cps config alias.s status >/dev/null && cps config alias.last "log -n 1 --oneline" >/dev/null
