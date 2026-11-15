@@ -346,7 +346,16 @@ pub fn ahead_behind(repo: &Repo, local: Id, remote: Id) -> Option<(usize, usize)
     Some((count_only_in(repo, local, remote)?, count_only_in(repo, remote, local)?))
 }
 
+/// The newest best common ancestor (enough to tell a fast-forward or "already up
+/// to date"; merges use `base_tree`, which takes all of them into account).
 pub fn merge_base(repo: &Repo, a: Id, b: Id) -> Result<Option<Id>> {
+    Ok(merge_bases(repo, a, b)?.pop())
+}
+
+/// Every best common ancestor of `a` and `b` (none is an ancestor of another),
+/// oldest first. Usually one; two or more after a "criss-cross" (two branches
+/// that each merged the other).
+pub fn merge_bases(repo: &Repo, a: Id, b: Id) -> Result<Vec<Id>> {
     let of_a = ancestors(repo, a)?;
     let common: Vec<Id> = ancestors(repo, b)?.into_iter().filter(|id| of_a.contains(id)).collect();
 
@@ -361,14 +370,45 @@ pub fn merge_base(repo: &Repo, a: Id, b: Id) -> Result<Option<Id>> {
         }
     }
 
-    let mut best: Option<(i64, [u8; 32])> = None;
+    let mut best = Vec::new();
     for c in common.iter().filter(|c| !redundant.contains(*c)) {
-        let key = (repo.read_commit(c)?.committer.time, *c.as_bytes());
-        if best.map_or(true, |b| key > b) {
-            best = Some(key);
+        best.push((repo.read_commit(c)?.committer.time, *c.as_bytes()));
+    }
+    best.sort();
+    best.dedup();
+    Ok(best.into_iter().map(|(_, bytes)| Id::from_bytes(bytes)).collect())
+}
+
+/// The files a merge of `ours` and `theirs` compares both sides against. With one
+/// best common ancestor, its files. With several (a criss-cross), they're first
+/// merged into one "virtual" base, as git does: taking just one would ignore what
+/// happened on the others, so a change one side later undid could come back.
+/// Conflicts there are kept in the virtual base with their markers, which then
+/// meet the real sides' versions (as with git's recursive and ort strategies).
+pub fn base_tree(repo: &Repo, ours: Id, theirs: Id) -> Result<Files> {
+    virtual_base(repo, ours, theirs, 0)
+}
+
+fn virtual_base(repo: &Repo, a: Id, b: Id, depth: usize) -> Result<Files> {
+    let bases = merge_bases(repo, a, b)?;
+    let tree = |id: &Id| -> Result<Files> { flatten(&repo.store, &repo.read_commit(id)?.tree) };
+    match bases.as_slice() {
+        [] => Ok(BTreeMap::new()),
+        [one] => tree(one),
+        // Far too tangled to be worth it: fall back to the newest, as copse used to.
+        [.., newest] if depth >= 8 => tree(newest),
+        [first, rest @ ..] => {
+            let mut merged = tree(first)?;
+            let mut prev = *first;
+            for (i, next) in rest.iter().enumerate() {
+                let base = virtual_base(repo, prev, *next, depth + 1)?;
+                let (m, _) = merge_trees(repo, &base, &merged, &tree(next)?, "Temporary merge branch 1", &format!("Temporary merge branch {}", i + 2))?;
+                merged = m;
+                prev = *next;
+            }
+            Ok(merged)
         }
     }
-    Ok(best.map(|(_, bytes)| Id::from_bytes(bytes)))
 }
 
 // ---------------------------------------------------------------- line merge
@@ -552,11 +592,7 @@ pub fn merge_octopus(targets: &[String], message: Option<&str>) -> Result<()> {
             println!("Already up to date with {t}.");
             continue;
         }
-        let base = merge_base(&repo, ours, theirs)?;
-        let base_tree = match base {
-            Some(b) => flatten(&repo.store, &repo.read_commit(&b)?.tree)?,
-            None => BTreeMap::new(),
-        };
+        let base_tree = base_tree(&repo, ours, theirs)?;
         let theirs_tree = flatten(&repo.store, &repo.read_commit(&theirs)?.tree)?;
         let (result, conflicts) = merge_trees(&repo, &base_tree, &merged, &theirs_tree, &ours_label, t)?;
         if !conflicts.is_empty() {
@@ -639,10 +675,7 @@ pub fn merge_with(target: Option<&str>, abort: bool, ff: FastForward, message: O
     }
     let theirs_tree = flatten(&repo.store, &repo.read_commit(&theirs)?.tree)?;
     let ours_tree = flatten(&repo.store, &repo.read_commit(&ours)?.tree)?;
-    let base_tree = match base {
-        Some(b) => flatten(&repo.store, &repo.read_commit(&b)?.tree)?,
-        None => BTreeMap::new(),
-    };
+    let base_tree = base_tree(&repo, ours, theirs)?;
     let ours_label = head_label(&repo)?;
     let (merged, conflicts) = match strategy {
         // -s ours: a merge commit whose files are exactly the current branch's.

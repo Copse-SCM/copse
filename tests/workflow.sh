@@ -184,6 +184,21 @@ cd "$WORK"
 (cd strat/copse && expect_fail "-s subtree is refused, saying why" "isn't supported" cps merge -s subtree side)
 (cd strat/copse && { cps merge -s resolve side -m r 2>&1 || true; } | has "conflict") && ok "-s resolve is the normal merge (here it stops on the same conflicts)" || fail "line $LINENO: -s resolve"
 
+echo "== criss-cross merges (checked against git)"
+# Two branches that each merged the other have two best common ancestors. Taking
+# just one ignores what happened on the other, so a change main later undid would
+# come back; like git, copse merges the ancestors into one base first.
+cd "$WORK" && rm -rf cc cc-copse && git init -q -b main cc && cd cc
+printf 'x=1\n\n\n\ny=1\n\n\n\nz=1\n' > f && git add f && git commit -qm O && git branch B
+sedi 's/^x=1$/x=2/' f && git commit -qam A1
+git checkout -q B && sedi 's/^y=1$/y=2/' f && git commit -qam B1 && git merge -q --no-edit main >/dev/null
+git checkout -q main && git merge -q --no-edit B~1 >/dev/null && sedi 's/^x=2$/x=1/' f && git commit -qam "A3: undo x"
+git checkout -q B && sedi 's/^z=1$/z=2/' f && git commit -qam B3 && git checkout -q main
+cps clone "$WORK/cc" "$WORK/cc-copse" >/dev/null && cd "$WORK/cc-copse"
+same "$(cps rev-parse origin/main origin/B >/dev/null && echo ok)" "ok" "(the criss-crossed history is cloned)"
+cps merge origin/B -m merged >/dev/null && (cd "$WORK/cc" && git merge -q --no-edit B >/dev/null)
+same "$(cat f | tr '\n' ' ')" "$(cat "$WORK/cc/f" | tr '\n' ' ')" "a change undone after a criss-cross stays undone, and both sides' other changes merge, as in git"
+
 echo "== fast-forward pulls touch only what changed"
 mkdir ff && cd ff && cps init >/dev/null && mkdir -p src docs && echo a > src/a.txt && echo b > src/b.txt && echo d > docs/d.txt && echo k > keep.txt && cps commit -m base >/dev/null
 cd .. && cps clone ff ff2 >/dev/null && cd ff

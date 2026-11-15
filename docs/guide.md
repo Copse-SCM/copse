@@ -133,7 +133,7 @@ copse honours `.gitignore` files and also reads `.copseignore`, which uses the s
 
 - **Already contained:** if your branch already contains `feature`, it says "Already up to date".
 - **Fast-forward:** if `feature` is directly ahead of you, your branch just moves forward to it.
-- **Three-way merge:** otherwise each file is compared across base, yours and theirs. A file changed on only one side takes that side, including deletions. A file changed on both sides is merged line by line. If that's clean, copse makes a merge commit with two parents right away.
+- **Three-way merge:** otherwise each file is compared across base, yours and theirs. A file changed on only one side takes that side, including deletions. A file changed on both sides is merged line by line. If that's clean, copse makes a merge commit with two parents right away. The base is the newest commit both sides share. After a "criss-cross" (two branches that each merged the other) there are several such commits; as git does, copse first merges them into one base, so a change one side undid since doesn't come back.
 - **Conflicts:** overlapping edits get git-style markers:
   ```
   <<<<<<< main
@@ -600,7 +600,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `tags.sh` | 20 | Local tags |
 | `tui.sh` | 76 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |
-| `workflow.sh` | 74 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
+| `workflow.sh` | 76 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
 
 `cargo test` runs unit tests for merging, hunks, the rebase list, timezones and git's formats (checked against hashes real git produces). `tests/fuzz.py` is a randomized stress test: it builds the same random histories in git and copse (edits, inserts, deletions, new files, renames, folder moves), then merges, rebases and cherry-picks in both and compares the results file by file. Run `tests/fuzz.py 500 <seed>`; 2,000 rounds across eight seeds match git exactly.
 
