@@ -878,6 +878,31 @@ pub fn merge_trees(
             merged.insert(theirs_to, combined);
         }
     }
+    // A file where the other side has a folder (`x` and `x/y`) can't both be
+    // written. As git does, the file is moved aside to `x~<its side>` and it's a
+    // conflict: you decide where it belongs, then commit.
+    let clashing: Vec<String> = merged
+        .keys()
+        .filter(|p| {
+            let inside = format!("{p}/");
+            merged.range(inside.clone()..).next().is_some_and(|(k, _)| k.starts_with(&inside))
+        })
+        .cloned()
+        .collect();
+    for path in clashing {
+        let v = merged.remove(&path).expect("listed above");
+        let side = if theirs_tree.get(&path) == Some(&v) && ours_tree.get(&path) != Some(&v) { theirs_label } else { ours_label };
+        let side: String = side.chars().map(|c| if c.is_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect();
+        let mut aside = format!("{path}~{side}");
+        let mut n = 1;
+        while merged.contains_key(&aside) {
+            n += 1;
+            aside = format!("{path}~{side}_{n}");
+        }
+        merged.insert(aside.clone(), v);
+        conflicts.retain(|(p, _)| *p != path);
+        conflicts.push((aside, "a file where the other side has a folder of the same name; moved aside to this name"));
+    }
     Ok((merged, conflicts))
 }
 

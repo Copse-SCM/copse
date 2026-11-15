@@ -198,6 +198,7 @@ cps clone "$WORK/cc" "$WORK/cc-copse" >/dev/null && cd "$WORK/cc-copse"
 same "$(cps rev-parse origin/main origin/B >/dev/null && echo ok)" "ok" "(the criss-crossed history is cloned)"
 cps merge origin/B -m merged >/dev/null && (cd "$WORK/cc" && git merge -q --no-edit B >/dev/null)
 same "$(cat f | tr '\n' ' ')" "$(cat "$WORK/cc/f" | tr '\n' ' ')" "a change undone after a criss-cross stays undone, and both sides' other changes merge, as in git"
+cd "$WORK"
 
 echo "== content on one side, permissions on the other (checked against git)"
 cd "$WORK" && rm -rf mx mx-copse && git init -q -b main mx && cd mx
@@ -209,6 +210,18 @@ out=$(cps merge origin/other -m merged 2>&1) && (cd "$WORK/mx" && git merge -q -
 mx() { for f in bin run.sh; do printf '%s %s %s, ' "$f" "$([[ -x $f ]] && echo exec || echo plain)" "$(od -An -c "$f" | tr -s ' ' | tr -d '\n')"; done; }
 [[ "$out" != *conflict* ]] && same "$(mx)" "$(cd "$WORK/mx" && mx)" "a binary or text file whose contents changed on one side and permissions on the other merges cleanly with both, as in git" || fail "$out"
 cps reset --hard HEAD~1 >/dev/null && cps cherry-pick origin/other >/dev/null 2>&1 && same "$(mx)" "$(cd "$WORK/mx" && mx)" "and so does cherry-pick" || fail "line $LINENO: a step before this check failed"
+cd "$WORK"
+
+echo "== a file on one side, a folder of the same name on the other"
+cd "$WORK" && rm -rf fileclash && mkdir fileclash && cd fileclash && cps init >/dev/null && echo base > keep && cps commit -m base >/dev/null && cps branch other >/dev/null
+echo mine > x && cps commit -m "file x" >/dev/null && cps checkout other >/dev/null && mkdir x && echo theirs > x/y && cps commit -m "folder x" >/dev/null && cps checkout main >/dev/null
+out=$(cps merge other 2>&1)
+[[ "$out" == *"x~main"* && $(cat x~main) == mine && $(cat x/y) == theirs ]] && ok "the file is moved aside to x~main (git: x~HEAD) as a conflict, and the folder is written" || fail "$out"
+mv x~main x/from-main && cps commit -m "merged" >/dev/null && same "$(cps ls-files | tr '\n' ' ')" "keep x/from-main x/y " "after moving it where it belongs, the merge commits" || fail "line $LINENO: a step before this check failed"
+cps reset --hard HEAD~1 >/dev/null && cps checkout other >/dev/null
+out=$(cps rebase main 2>&1); [[ "$out" == *"x~"* && -f x/y ]] && cps rebase --abort >/dev/null && cps status | has "On branch other" && ok "a rebase stops on it the same way, and can be aborted" || fail "$out"
+cps checkout main >/dev/null && cps merge other >/dev/null 2>&1; cps merge --abort >/dev/null && [[ $(cat x) == mine && ! -e x~main && ! -e x/y ]] && ok "and merge --abort puts the file back" || fail "line $LINENO: $(ls)"
+cd "$WORK"
 
 echo "== fast-forward pulls touch only what changed"
 mkdir ff && cd ff && cps init >/dev/null && mkdir -p src docs && echo a > src/a.txt && echo b > src/b.txt && echo d > docs/d.txt && echo k > keep.txt && cps commit -m base >/dev/null
