@@ -227,6 +227,7 @@ copse config core.editor nano                    # for rebase lists and messages
   - `~/.config/copse/ignore` applies to every repository; `core.excludesFile` points somewhere else instead.
   - `.copse/exclude` holds rules for one repository that aren't committed.
   - These sit on top of each folder's `.gitignore` and `.copseignore`.
+  - As in git, ignore rules only hide files that aren't tracked yet. A file that's already committed (or that git tracks despite a rule, like a force-added `keep.log`) stays tracked: its edits show up and commit as usual, and `clean -x` never removes it. To stop tracking one, delete it and commit.
 - **Hooks** are executable scripts in `.copse/hooks/`, or in a folder of the project named by `core.hooksPath` so a team can share them. They run from the top of the repository:
 
   | Hook | When | Can stop it? |
@@ -578,7 +579,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `branches.sh` | 54 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
 | `bridge.sh` | 52 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
 | `commit.sh` | 61 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
-| `config.sh` | 48 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
+| `config.sh` | 56 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
 | `github.sh` | 129 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |

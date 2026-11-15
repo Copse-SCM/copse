@@ -79,6 +79,21 @@ same "$(cps status | grep -E '^  [AMD] ' | sed 's/^ *//' | tr '\n' ',')" "A buil
 cps clean -x | has "keep.txt" && ok "clean -x sees those files as ignored" || fail "line $LINENO: a step before this check failed"
 cps config --global --unset core.excludesFile >/dev/null && rm -rf debug.log build notes.txt && cps commit -m "keep" >/dev/null
 
+echo "== ignore rules only hide untracked files"
+here=$(pwd) && rm -rf "$WORK/ti" "$WORK/ti.git" "$WORK/elsewhere" && git init -q -b main "$WORK/ti.git"
+(cd "$WORK/ti.git" && printf '*.log\nbuild/\n' > .gitignore && echo k > keep.log && mkdir build && echo b > build/keep.txt && echo a > a && git add . && git add -f keep.log build/keep.txt && GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@e git commit -qm i)
+cps clone "$WORK/ti.git" "$WORK/ti" >/dev/null && cd "$WORK/ti"
+cps status | has "Nothing changed" && ok "files git tracks despite an ignore rule (or inside an ignored folder) aren't seen as deleted after a clone" || fail "line $LINENO: $(cps status)"
+echo b2 > a && cps commit -m edit >/dev/null && same "$(cps ls-files | tr '\n' ',')" ".gitignore,a,build/keep.txt,keep.log," "and the next commit keeps them, as git does"
+echo k2 > keep.log && same "$(cps status | grep -E '^  [AMD] ' | sed 's/^ *//' | tr '\n' ',')" "M keep.log," "edits to them are seen" && cps commit -m k2 >/dev/null && same "$(cps show HEAD:keep.log)" "k2" "and committed" || fail "line $LINENO: a step before this check failed"
+echo other > other.log && out=$(cps clean -x) && [[ "$out" == *"other.log"* && "$out" != *"keep.log"* && "$out" != *"build/keep.txt"* ]] && ok "clean -x removes only untracked ignored files, never tracked ones" || fail "line $LINENO: $out"
+rm other.log && cps grep k2 | has "keep.log" && ok "grep searches them" || fail "line $LINENO: a step before this check failed"
+mkdir "$WORK/elsewhere" && echo b > "$WORK/elsewhere/keep.txt" && rm -rf build && ln -s "$WORK/elsewhere" build
+cps status | has "D build/keep.txt" && ok "a tracked file is never read through a symlinked folder" || fail "line $LINENO: $(cps status)"
+rm build && mkdir build && echo b > build/keep.txt && echo late > late.txt && cps commit -m late >/dev/null && echo 'late.txt' >> .copse/exclude
+cps status | has "Nothing changed" && echo late2 > late.txt && cps status | has "M late.txt" && ok "a rule added after a file was committed doesn't untrack it" || fail "line $LINENO: $(cps status)"
+cd "$here"
+
 echo "== hooks"
 hook .copse/hooks/pre-commit <<'EOF'
 #!/bin/sh

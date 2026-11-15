@@ -678,7 +678,7 @@ fn fold_path(path: &str) -> String {
 }
 
 /// Does the disk under `root` treat names that differ only in case as the same?
-fn ignores_case(root: &std::path::Path) -> bool {
+pub(crate) fn ignores_case(root: &std::path::Path) -> bool {
     if fs::symlink_metadata(root.join(".copse")).is_ok() {
         fs::symlink_metadata(root.join(".COPSE")).is_ok()
     } else {

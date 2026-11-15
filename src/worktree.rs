@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -325,8 +325,10 @@ pub fn stat_of(md: &fs::Metadata) -> Meta {
 }
 
 /// Walk the working directory in parallel, honoring .gitignore and .copseignore, the
-/// global ignore file and .copse/exclude.
-fn scan(root: &Path) -> Vec<Stat> {
+/// global ignore file and .copse/exclude. As in git, ignore rules only hide untracked
+/// files: anything in `index` is still found if it's on disk, even where a rule (or
+/// an ignored folder) matches it.
+fn scan(root: &Path, index: &Index) -> Vec<Stat> {
     let found = Mutex::new(Vec::new());
     let mut builder = WalkBuilder::new(root);
     for file in crate::config::ignore_files(root) {
@@ -395,9 +397,67 @@ fn scan(root: &Path) -> Vec<Stat> {
             })
         });
     let mut found = found.into_inner().unwrap();
-    found.extend(nested.lock().unwrap().drain(..).map(|path| Stat { path, size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode: Mode::Submodule }));
+    let nested = nested.lock().unwrap().drain(..).collect::<Vec<_>>();
+    let seen: std::collections::HashSet<&str> = found.iter().map(|s| s.path.as_str()).collect();
+    let skipped: Vec<Stat> = index
+        .entries
+        .par_iter()
+        .filter(|(path, e)| e.mode != Mode::Submodule && !seen.contains(path.as_str()))
+        .filter(|(path, _)| !nested.iter().any(|n| path.strip_prefix(n.as_str()).is_some_and(|rest| rest.starts_with('/'))))
+        .filter_map(|(path, _)| tracked_on_disk(root, path))
+        .collect();
+    drop(seen);
+    let skipped = if !skipped.is_empty() && crate::cmd::ignores_case(root) { spelled_exactly(root, skipped) } else { skipped };
+    found.extend(skipped);
+    found.extend(nested.into_iter().map(|path| Stat { path, size: 0, mtime_ns: 0, ctime_ns: 0, ino: 0, mode: Mode::Submodule }));
     found.par_sort_unstable_by(|a, b| a.path.cmp(&b.path));
     found
+}
+
+/// A tracked file the walk skipped (an ignore rule matches it, or a folder it's in),
+/// if it's still there: a file or symlink under real folders only (never reached
+/// through a symlinked folder, which the walk wouldn't follow either).
+fn tracked_on_disk(root: &Path, path: &str) -> Option<Stat> {
+    let full = crate::objects::disk_path(root, path);
+    let md = fs::symlink_metadata(&full).ok()?;
+    if !(md.file_type().is_file() || md.file_type().is_symlink()) {
+        return None;
+    }
+    let mut dir = full.parent()?;
+    while dir != root {
+        if !fs::symlink_metadata(dir).ok()?.file_type().is_dir() {
+            return None;
+        }
+        dir = dir.parent()?;
+    }
+    let m = stat_of(&md);
+    Some(Stat { path: path.to_string(), size: m.size, mtime_ns: m.mtime_ns, ctime_ns: m.ctime_ns, ino: m.ino, mode: m.mode })
+}
+
+/// On a disk that ignores case, a tracked `A/b` the walk didn't return may only be
+/// the file it found as `a/b`; keep just the stats whose every name is spelled
+/// exactly so on disk (folder listings are read once each).
+fn spelled_exactly(root: &Path, stats: Vec<Stat>) -> Vec<Stat> {
+    use std::collections::{HashMap, HashSet};
+    let mut listings: HashMap<PathBuf, HashSet<std::ffi::OsString>> = HashMap::new();
+    stats
+        .into_iter()
+        .filter(|s| {
+            let full = crate::objects::disk_path(root, &s.path);
+            let Ok(rel) = full.strip_prefix(root) else { return false };
+            let mut dir = root.to_path_buf();
+            for part in rel.components() {
+                let names = listings.entry(dir.clone()).or_insert_with(|| {
+                    fs::read_dir(&dir).map(|r| r.flatten().map(|e| e.file_name()).collect()).unwrap_or_default()
+                });
+                if !names.contains(part.as_os_str()) {
+                    return false;
+                }
+                dir.push(part);
+            }
+            true
+        })
+        .collect()
 }
 
 /// A folder that's a repository of its own (has a `.copse` or `.git` inside).
@@ -405,14 +465,16 @@ fn is_nested_repo(e: &ignore::DirEntry) -> bool {
     e.file_type().is_some_and(|t| t.is_dir()) && (e.path().join(".copse").exists() || e.path().join(".git").exists())
 }
 
-/// Paths of every file copse tracks (everything not ignored), sorted.
-pub fn tracked_paths(root: &Path) -> Vec<String> {
-    scan(root).into_iter().filter(|s| s.mode != Mode::Submodule).map(|s| s.path).collect()
+/// Paths of every file copse tracks (everything not ignored, plus whatever `index`
+/// already tracks), sorted.
+pub fn tracked_paths(root: &Path, index: &Index) -> Vec<String> {
+    scan(root, index).into_iter().filter(|s| s.mode != Mode::Submodule).map(|s| s.path).collect()
 }
 
-/// Paths of files that .gitignore / .copseignore rules hide, sorted.
-pub fn ignored_paths(root: &Path) -> Vec<String> {
-    let tracked: std::collections::HashSet<String> = tracked_paths(root).into_iter().collect();
+/// Paths of files that .gitignore / .copseignore rules hide (and that aren't
+/// tracked anyway), sorted.
+pub fn ignored_paths(root: &Path, index: &Index) -> Vec<String> {
+    let tracked: std::collections::HashSet<String> = tracked_paths(root, index).into_iter().collect();
     let mut out = Vec::new();
     let walker = WalkBuilder::new(root)
         .standard_filters(false)
@@ -450,7 +512,7 @@ pub fn snapshot(root: &Path, index: &Index, store: Option<&Store>) -> Result<Vec
     // LFS: files it handles are stored as pointers (their contents go to .copse/lfs).
     let lfs = crate::lfs::Attrs::load(root);
     let lfs_dir = if lfs.active() { crate::repo::Repo::open_path(root).ok().map(|r| r.dir) } else { None };
-    scan(root)
+    scan(root, index)
         .into_par_iter()
         .filter(|s| {
             // A nested repository counts only if it's a submodule (committed, or in .gitmodules).

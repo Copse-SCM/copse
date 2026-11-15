@@ -33,7 +33,7 @@ pub fn clean(force: bool, ignored: bool, paths: &[String]) -> Result<()> {
     let ch = changes(&index, &snapshot(&repo.root, &index, None)?);
     let new_files: Vec<String> = ch.added.iter().filter(|p| under(&specs, p)).cloned().collect();
     let ignored_files: Vec<String> =
-        if ignored { ignored_paths(&repo.root).into_iter().filter(|p| under(&specs, p)).collect() } else { Vec::new() };
+        if ignored { ignored_paths(&repo.root, &index).into_iter().filter(|p| under(&specs, p)).collect() } else { Vec::new() };
     if new_files.is_empty() && ignored_files.is_empty() {
         println!("Nothing to clean.");
         return Ok(());
@@ -105,7 +105,7 @@ pub fn grep(args: GrepArgs) -> Result<()> {
             if repo.is_bare() {
                 bail!("this repository has no working files; give a revision to search: copse grep PATTERN REV");
             }
-            (String::new(), tracked_paths(&repo.root).into_iter().filter(|p| under(&specs, p)).map(|p| (p, None)).collect())
+            (String::new(), tracked_paths(&repo.root, &Index::load(&repo.wt)?).into_iter().filter(|p| under(&specs, p)).map(|p| (p, None)).collect())
         }
     };
 
