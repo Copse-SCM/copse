@@ -14,7 +14,7 @@ use crate::repo::Repo;
 use crate::worktree::{read_content, stat_of, Entry, Index};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 type Side = Option<(Mode, Id)>;
@@ -60,6 +60,9 @@ fn walk(store: &Store, old: Option<Id>, new: Option<Id>, prefix: &str, out: &mut
 
 /// Is the file at `path` exactly what the index says (no uncommitted edit)?
 fn unchanged_on_disk(repo: &Repo, index: &Index, path: &str, e: &Entry) -> Result<bool> {
+    if crate::cmd::symlink_on_the_way(&repo.root, path).is_some() {
+        return Ok(false); // only reachable through a symlinked folder: not ours to read
+    }
     let full = crate::objects::disk_path(&repo.root, path);
     let Ok(md) = fs::symlink_metadata(&full) else { return Ok(false) };
     if e.mode == Mode::Submodule {
@@ -90,8 +93,19 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
     let sparse = crate::sparse::Sparse::load(&repo.wt);
 
     // First, check everything: nothing is written unless all of it is safe.
-    let mut in_the_way = Vec::new();
-    for (path, before, _after) in &changes {
+    let (mut in_the_way, mut through_links) = (Vec::new(), Vec::new());
+    // Tracked files (symlinks included) this removes; a committed link that
+    // becomes a folder is gone before anything is written into it.
+    let leaving: BTreeSet<&str> = changes.iter().filter(|(_, b, a)| b.is_some() && a.is_none()).map(|(p, _, _)| p.as_str()).collect();
+    for (path, before, after) in &changes {
+        // A folder on the way is a symlink of yours: the file can't be checked,
+        // removed or written without going wherever the link points.
+        if let Some(link) = crate::cmd::symlink_on_the_way(&repo.root, path).filter(|l| !leaving.contains(l.as_str())) {
+            if before.is_some() || after.is_some_and(|_| !sparse.outside(path)) {
+                through_links.push(format!("{path} ({link} is a symlink here)"));
+                continue;
+            }
+        }
         let on_disk = fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)).is_ok();
         match (index.entries.get(path), before) {
             (Some(e), Some(_)) => {
@@ -107,12 +121,49 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
             _ => {}
         }
     }
+    if !through_links.is_empty() {
+        for p in &through_links {
+            println!("  {p}");
+        }
+        bail!("{} file(s) are inside a folder you've made a symlink, and copse won't change files through one (they'd be wherever it points); replace the link with a real folder and try again. Nothing was changed", through_links.len());
+    }
     if !in_the_way.is_empty() {
         for p in &in_the_way {
             println!("  {p}");
         }
         bail!("{} file(s) would be overwritten; commit or stash them first (other uncommitted changes are fine)", in_the_way.len());
     }
+
+    let to_remove: BTreeSet<String> = changes
+        .iter()
+        .filter(|(p, before, after)| before.is_some() && after.is_none() && fs::symlink_metadata(crate::objects::disk_path(&repo.root, p)).is_ok())
+        .map(|(p, _, _)| p.clone())
+        .collect();
+    let writes: Vec<(&str, Mode, Id)> = changes
+        .iter()
+        .filter_map(|(p, _, after)| after.map(|(m, id)| (p.as_str(), m, id)))
+        .filter(|(p, m, _)| !(sparse.outside(p) && !crate::objects::disk_path(&repo.root, p).exists() && *m != Mode::Submodule))
+        .collect();
+    let skipped: Vec<(&str, Mode, Id)> = changes
+        .iter()
+        .filter_map(|(p, _, after)| after.map(|(m, id)| (p.as_str(), m, id)))
+        .filter(|(p, _, id)| !writes.iter().any(|(wp, _, wid)| wp == p && wid == id))
+        .collect();
+    // Untracked or ignored files where a folder has to go, or inside a folder that
+    // has to become a file; then downloads. All before the first file is touched,
+    // so a fast-forward happens completely or not at all, as checkout does.
+    crate::cmd::check_way_clear(repo, &to_remove, &writes)?;
+    if repo.is_partial() {
+        let ids: Vec<Id> = writes.iter().filter(|(_, m, _)| *m != Mode::Submodule).map(|(_, _, id)| *id).collect();
+        repo.store.prefetch(&ids)?;
+    }
+    // LFS rules come from the commit being checked out (its .gitattributes may be new).
+    let mut top = crate::merge::Files::new();
+    if let Some(e) = decode_tree(&repo.store.get_kind(&to, Kind::Tree)?)?.into_iter().find(|e| e.name == ".gitattributes") {
+        top.insert(e.name, (e.mode, e.id));
+    }
+    let lfs = crate::lfs::Attrs::for_files(repo, &top);
+    crate::lfs::before_checkout(repo, &lfs, &writes);
 
     // Removals first (so a file can become a folder), then writes.
     let mut removed = 0;
@@ -139,27 +190,6 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
             }
         }
     }
-    let writes: Vec<(&str, Mode, Id)> = changes
-        .iter()
-        .filter_map(|(p, _, after)| after.map(|(m, id)| (p.as_str(), m, id)))
-        .filter(|(p, m, _)| !(sparse.outside(p) && !crate::objects::disk_path(&repo.root, p).exists() && *m != Mode::Submodule))
-        .collect();
-    let skipped: Vec<(&str, Mode, Id)> = changes
-        .iter()
-        .filter_map(|(p, _, after)| after.map(|(m, id)| (p.as_str(), m, id)))
-        .filter(|(p, _, id)| !writes.iter().any(|(wp, _, wid)| wp == p && wid == id))
-        .collect();
-    if repo.is_partial() {
-        let ids: Vec<Id> = writes.iter().filter(|(_, m, _)| *m != Mode::Submodule).map(|(_, _, id)| *id).collect();
-        repo.store.prefetch(&ids)?;
-    }
-    // LFS rules come from the commit being checked out (its .gitattributes may be new).
-    let mut top = crate::merge::Files::new();
-    if let Some(e) = decode_tree(&repo.store.get_kind(&to, Kind::Tree)?)?.into_iter().find(|e| e.name == ".gitattributes") {
-        top.insert(e.name, (e.mode, e.id));
-    }
-    let lfs = crate::lfs::Attrs::for_files(repo, &top);
-    crate::lfs::before_checkout(repo, &lfs, &writes);
     writes.par_iter().try_for_each(|(path, mode, id)| write_file(repo, path, *mode, id).with_context(|| format!("writing {path}")))?;
     crate::lfs::after_checkout(repo, &lfs, &writes)?;
     for (path, mode, id) in &writes {

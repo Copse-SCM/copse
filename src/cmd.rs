@@ -612,7 +612,7 @@ pub(crate) fn apply_tree(
 /// go (`a` when writing `a/b`), or one inside a folder that has to become a file
 /// (`a/notes.log` when writing the file `a`). It isn't removed for you: ignored
 /// files can still be work you want, and copse never throws work away unasked.
-fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_write: &[(&str, Mode, Id)]) -> Result<()> {
+pub(crate) fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_write: &[(&str, Mode, Id)]) -> Result<()> {
     let refuse = |blocker: &str, path: &str| -> Result<()> {
         bail!("{blocker} is in the way of {path}, and copse doesn't track it (it may be ignored); move or delete it and try again. Nothing was changed")
     };
@@ -729,17 +729,23 @@ fn check_case_clashes(root: &std::path::Path, target: &BTreeMap<String, (Mode, I
     Ok(())
 }
 
+/// The first folder on the way to `path` that's a symlink, if any. Reading, writing
+/// or removing `path` would go wherever that link points, perhaps outside the
+/// project, so copse never does: to it, the file simply isn't there. (Each folder
+/// is checked where it really is on disk; see disk_path.)
+pub(crate) fn symlink_on_the_way(root: &std::path::Path, path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    (1..parts.len()).map(|n| parts[..n].join("/")).find(|folder| {
+        fs::symlink_metadata(crate::objects::disk_path(root, folder.as_str())).is_ok_and(|m| m.file_type().is_symlink())
+    })
+}
+
 pub(crate) fn write_file(repo: &Repo, path: &str, mode: Mode, id: &Id) -> Result<()> {
     let full = crate::objects::disk_path(&repo.root, path);
     // Never write through a symlink: if a folder on the way is a link, the file
     // would land wherever it points, perhaps outside the project (git refuses too).
-    // (Each folder on the way is checked where it really is on disk; see disk_path.)
-    let parts: Vec<&str> = path.split('/').collect();
-    for n in 1..parts.len() {
-        let at = crate::objects::disk_path(&repo.root, parts[..n].join("/"));
-        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
-            bail!("refusing to write {path}: {} is a symlink, and writing through it could put the file somewhere else", at.strip_prefix(&repo.root).unwrap_or(&at).display());
-        }
+    if let Some(link) = symlink_on_the_way(&repo.root, path) {
+        bail!("refusing to write {path}: {link} is a symlink, and writing through it could put the file somewhere else");
     }
     if mode == Mode::Submodule {
         // An empty folder for it; `copse submodule update --init` fills it in.

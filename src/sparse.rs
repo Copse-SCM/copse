@@ -113,19 +113,36 @@ fn apply(repo: &Repo, old: &Sparse, new: &Sparse) -> Result<(usize, usize)> {
     }
     let head = repo.head_commit()?.context("commit something first")?;
     let tree = flatten(&repo.store, &repo.read_commit(&head)?.tree)?;
-    let (mut removed, mut written) = (0, 0);
+    // Work out every change first. A file inside a folder you've made a symlink
+    // isn't ours: it's never removed (that would delete whatever the link points
+    // at) and can't be written, so it stops the change before anything happens.
+    let (mut to_remove, mut to_write, mut through_links) = (Vec::new(), Vec::new(), Vec::new());
     for (path, (mode, id)) in &tree {
-        let on_disk = crate::objects::disk_path(&repo.root, path).symlink_metadata().is_ok();
+        let link = crate::cmd::symlink_on_the_way(&repo.root, path);
+        let on_disk = link.is_none() && crate::objects::disk_path(&repo.root, path).symlink_metadata().is_ok();
         if new.outside(path) && on_disk && index.entries.contains_key(path) {
-            remove_and_tidy(&repo.root, path)?;
-            removed += 1;
+            to_remove.push(path);
         } else if !new.outside(path) && !on_disk && (old.outside(path) || !ch.deleted.contains(path)) {
-            write_file(repo, path, *mode, id)?;
-            written += 1;
+            match link {
+                Some(link) => through_links.push(format!("{path} ({link} is a symlink here)")),
+                None => to_write.push((path, *mode, *id)),
+            }
         }
     }
+    if !through_links.is_empty() {
+        for p in &through_links {
+            println!("  {p}");
+        }
+        bail!("{} file(s) would have to be written through a symlink; replace the link with a real folder (or leave that folder out) and try again. Nothing was changed", through_links.len());
+    }
+    for path in &to_remove {
+        remove_and_tidy(&repo.root, path)?;
+    }
+    for (path, mode, id) in &to_write {
+        write_file(repo, path, *mode, id)?;
+    }
     new.save(repo)?;
-    Ok((removed, written))
+    Ok((to_remove.len(), to_write.len()))
 }
 
 pub enum SparseCmd<'a> {

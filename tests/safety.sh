@@ -168,5 +168,27 @@ cps reset --hard >/dev/null && cps stash drop 0 >/dev/null && cps stash drop 0 >
 echo scratch > u && cps checkout -f two >/dev/null && [[ $(cps stash list | wc -l) == "$before" && $(cat u) == scratch ]] && ok "untracked files it keeps don't make a stash" || fail "line $LINENO: a step before this check failed"
 cd ..
 
+echo "== a symlinked folder of yours is never gone through"
+mkdir linked && cd linked && cps init >/dev/null && mkdir vendor keep && echo lib > vendor/lib.c && echo k > keep/k && cps commit -m one >/dev/null
+cps branch other >/dev/null && cps checkout other >/dev/null && rm vendor/lib.c && echo more > keep/more && cps commit -m "drop lib" >/dev/null && cps checkout main >/dev/null
+mkdir ../shared && echo lib > ../shared/lib.c && rm -rf vendor && ln -s ../shared vendor
+out=$(cps merge other 2>&1) && fail "a fast-forward removing a file inside a symlinked folder should be refused"
+[[ "$out" == *"vendor/lib.c (vendor is a symlink here)"* && -f ../shared/lib.c && ! -e keep/more ]] && ok "a fast-forward won't remove a file through a symlinked folder, and changes nothing" || fail "$out"
+rm vendor && mkdir vendor && echo lib > vendor/lib.c && cps status | has "Nothing changed" || fail "line $LINENO: $(cps status)"
+rm -rf vendor && ln -s ../shared vendor
+cps sparse set keep >/dev/null && [[ -f ../shared/lib.c ]] && ok "sparse set never deletes a file through a symlinked folder" || fail "line $LINENO: ../shared/lib.c was deleted"
+out=$(cps sparse disable 2>&1) && fail "sparse disable writing through a symlinked folder should be refused"
+[[ "$out" == *"Nothing was changed"* && -L vendor && -f ../shared/lib.c && ! -e ../shared/k ]] && ok "and won't write through one either" || fail "$out"
+cd ..
+
+echo "== a fast-forward happens completely or not at all"
+mkdir ffa && cd ffa && cps init >/dev/null && mkdir a && echo x > a/x && for i in $(seq 1 30); do echo $i > f$i; done && cps commit -m main >/dev/null
+cps branch other >/dev/null && cps checkout other >/dev/null && rm -rf a && echo file > a && for i in $(seq 1 30); do echo new$i > f$i; done && cps commit -m other >/dev/null && cps checkout main >/dev/null
+echo '*.log' > .copse/exclude && echo mine > a/notes.log
+out=$(cps merge other 2>&1) && fail "a fast-forward that has to replace a folder holding an ignored file should be refused"
+[[ "$out" == *"a/notes.log is in the way of a"* && -f a/x && $(cat f3) == 3 && $(cat f30) == 30 ]] && cps status | has "Nothing changed" && ok "an ignored file inside a folder that must become a file stops it before anything changes" || fail "$out"
+rm a/notes.log && cps merge other >/dev/null && [[ $(cat a) == file && $(cat f30) == new30 ]] && ok "with it moved away, the fast-forward goes through" || fail "line $LINENO: a step before this check failed"
+cd ..
+
 echo
 echo "All $pass checks passed."
