@@ -834,9 +834,26 @@ struct Importer<'a> {
     shallow: &'a HashSet<GitId>,
     /// A partial clone: file contents weren't sent.
     partial: bool,
+    store: &'a Store,
+    /// Copse ids imported so far in this pack (in `out`, not stored yet).
+    fresh: HashSet<Id>,
 }
 
 impl Importer<'_> {
+    /// The copse id of something already here (stored, or imported earlier from
+    /// this pack). A map record alone isn't enough: gc may have removed the
+    /// object since, and then it must be imported again.
+    fn have(&self, g: &GitId) -> Option<Id> {
+        self.map.copse(g).filter(|id| self.fresh.contains(id) || self.store.contains(id))
+    }
+
+    fn keep(&mut self, id: Id, kind: Kind, bytes: Arc<Vec<u8>>, g: GitId) {
+        self.map.insert(id, g);
+        if self.fresh.insert(id) {
+            self.out.push((id, kind, bytes, g));
+        }
+    }
+
     fn get(&self, g: &GitId, want: u8) -> Result<Arc<Vec<u8>>> {
         let (kind, data) = self.objects.get(g).with_context(|| format!("the server didn't send object {}", hex(g)))?;
         if *kind != want {
@@ -846,7 +863,7 @@ impl Importer<'_> {
     }
 
     fn tree(&mut self, g: GitId) -> Result<Id> {
-        if let Some(t) = self.map.copse(&g) {
+        if let Some(t) = self.have(&g) {
             return Ok(t);
         }
         let data = self.get(&g, 2)?;
@@ -866,6 +883,9 @@ impl Importer<'_> {
             } else if mode == Mode::Submodule {
                 crate::objects::gitlink_id(&child) // another repository's commit: kept as its git id
             } else {
+                // A file's copse id comes from its contents alone, so a map record
+                // is right even if gc removed the file (the pack brings it back,
+                // see the blob pass); a partial clone may not have it at all.
                 match self.map.copse(&child) {
                     Some(id) => id,
                     None if self.partial => crate::objects::gitlink_id(&child), // fetched when needed
@@ -880,20 +900,19 @@ impl Importer<'_> {
         }
         let bytes = encode_tree(&entries);
         let id = Store::hash(Kind::Tree, &bytes);
-        self.map.insert(id, g);
-        self.out.push((id, Kind::Tree, Arc::new(bytes), g));
+        self.keep(id, Kind::Tree, Arc::new(bytes), g);
         Ok(id)
     }
 
     /// Translate an annotated tag. None if it points at something copse can't tag
     /// (a single file or folder).
     fn tag(&mut self, g: GitId) -> Result<Option<Id>> {
-        if let Some(t) = self.map.copse(&g) {
+        if let Some(t) = self.have(&g) {
             return Ok(Some(t));
         }
         let t = parse_tag(&self.get(&g, 4)?, &g)?;
         let (target, target_kind) = match t.kind.as_str() {
-            "commit" => (self.map.copse(&t.object), Kind::Commit),
+            "commit" => (self.have(&t.object), Kind::Commit),
             "tag" => (self.tag(t.object)?, Kind::Tag),
             _ => (None, Kind::Blob),
         };
@@ -901,13 +920,12 @@ impl Importer<'_> {
         let tag = Tag { object: target, target_kind, name: t.name, tagger: t.tagger, extra: t.extra, message: t.message };
         let bytes = tag.encode();
         let id = Store::hash(Kind::Tag, &bytes);
-        self.map.insert(id, g);
-        self.out.push((id, Kind::Tag, Arc::new(bytes), g));
+        self.keep(id, Kind::Tag, Arc::new(bytes), g);
         Ok(Some(id))
     }
 
     fn commit(&mut self, g: GitId) -> Result<()> {
-        if self.map.copse(&g).is_some() {
+        if self.have(&g).is_some() {
             return Ok(()); // already have it (or just imported it)
         }
         let c = parse_commit(&self.get(&g, 1)?, &g)?;
@@ -915,7 +933,7 @@ impl Importer<'_> {
         let parents = c
             .parents
             .iter()
-            .map(|p| match self.map.copse(p) {
+            .map(|p| match self.have(p) {
                 Some(id) => Ok(id),
                 // At a shallow boundary the parent stays a git id until it's fetched.
                 None if self.shallow.contains(&g) => Ok(crate::objects::gitlink_id(p)),
@@ -925,14 +943,13 @@ impl Importer<'_> {
         let commit = Commit { tree, parents, author: c.author, committer: c.committer, extra: c.extra, message: c.message };
         let bytes = commit.encode();
         let id = Store::hash(Kind::Commit, &bytes);
-        self.map.insert(id, g);
-        self.out.push((id, Kind::Commit, Arc::new(bytes), g));
+        self.keep(id, Kind::Commit, Arc::new(bytes), g);
         Ok(())
     }
 }
 
 /// Commits in the pack that we don't have yet, parents before children.
-fn commit_order(objects: &HashMap<GitId, (u8, Arc<Vec<u8>>)>, map: &GitMap) -> Result<Vec<GitId>> {
+fn commit_order(objects: &HashMap<GitId, (u8, Arc<Vec<u8>>)>, have: impl Fn(&GitId) -> bool) -> Result<Vec<GitId>> {
     let mut order = Vec::new();
     let mut visited = HashSet::new();
     let mut roots: Vec<&GitId> = objects.iter().filter(|(_, (k, _))| *k == 1).map(|(g, _)| g).collect();
@@ -944,7 +961,7 @@ fn commit_order(objects: &HashMap<GitId, (u8, Arc<Vec<u8>>)>, map: &GitMap) -> R
                 order.push(g);
                 continue;
             }
-            if map.copse(&g).is_some() || !visited.insert(g) {
+            if have(&g) || !visited.insert(g) {
                 continue;
             }
             stack.push((g, true));
@@ -972,21 +989,21 @@ pub fn import_pack(repo: &Repo, map: &mut GitMap, pack: &[u8], shallow: &HashSet
 fn import_objects(repo: &Repo, map: &mut GitMap, objects: &HashMap<GitId, (u8, Arc<Vec<u8>>)>, shallow: &HashSet<GitId>, partial: bool) -> Result<usize> {
     let objects = objects.clone();
     let count = objects.len();
-    let mut im = Importer { map, objects: &objects, out: Vec::new(), shallow, partial };
+    let mut im = Importer { map, objects: &objects, out: Vec::new(), shallow, partial, store: &repo.store, fresh: HashSet::new() };
 
     // File contents first, hashed in parallel.
     let blobs: Vec<(GitId, Arc<Vec<u8>>)> = objects
         .iter()
-        .filter(|(g, (k, _))| *k == 3 && im.map.copse(g).is_none())
+        .filter(|(g, (k, _))| *k == 3 && im.have(g).is_none())
         .map(|(g, (_, d))| (*g, d.clone()))
         .collect();
     let hashed: Vec<(GitId, Id, Arc<Vec<u8>>)> = blobs.into_par_iter().map(|(g, d)| (g, Store::hash(Kind::Blob, &d), d)).collect();
     for (g, id, data) in hashed {
-        im.map.insert(id, g);
-        im.out.push((id, Kind::Blob, data, g));
+        im.keep(id, Kind::Blob, data, g);
     }
     // Then commits (each bringing its folders), parents first, then annotated tags.
-    for g in commit_order(&objects, im.map)? {
+    let here = |g: &GitId| im.map.copse(g).is_some_and(|id| repo.store.contains(&id));
+    for g in commit_order(&objects, here)? {
         im.commit(g)?;
     }
     let mut tag_ids: Vec<GitId> = objects.iter().filter(|(_, (k, _))| *k == 4).map(|(g, _)| *g).collect();

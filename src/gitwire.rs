@@ -46,6 +46,12 @@ pub fn parse_git_id(s: &str) -> Result<GitId> {
 
 /// copse id <-> git id for every object translated so far. Stored in `.copse/gitmap`
 /// as fixed 52-byte records, appended to as new objects are translated.
+///
+/// A record only says how an object translates, not that it's here: gc may have
+/// removed it since (a deleted branch's commits), so code deciding whether to fetch
+/// or import something checks the store too.
+const RECORD: u64 = 52;
+
 pub struct GitMap {
     path: PathBuf,
     to_git: HashMap<Id, GitId>,
@@ -63,13 +69,28 @@ impl GitMap {
         };
         let mut map = GitMap { path, to_git: HashMap::new(), from_git: HashMap::new(), pending: Vec::new() };
         // A trailing partial record (an interrupted append) is ignored; it's simply recomputed.
-        for rec in bytes.chunks_exact(52) {
+        for rec in bytes.chunks_exact(RECORD as usize) {
             let copse = Id::from_bytes(rec[..32].try_into().unwrap());
             let git: GitId = rec[32..].try_into().unwrap();
             map.to_git.insert(copse, git);
             map.from_git.insert(git, copse); // the latest record wins (see `replace`)
         }
         Ok(map)
+    }
+
+    /// For fsck: bytes of a record cut short at the end (repaired by the next
+    /// save), and objects here whose git id leads back to a different copse id
+    /// that isn't (so a fetch or push would use the wrong one).
+    pub fn check(&self, store: &Store) -> (u64, Vec<(Id, GitId)>) {
+        let torn = fs::metadata(&self.path).map(|m| m.len() % RECORD).unwrap_or(0);
+        let mut wrong: Vec<(Id, GitId)> = self
+            .to_git
+            .iter()
+            .filter(|(c, g)| store.contains(c) && self.from_git.get(*g).is_some_and(|back| back != *c && !store.contains(back)))
+            .map(|(c, g)| (*c, *g))
+            .collect();
+        wrong.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        (torn, wrong)
     }
 
     pub fn git(&self, id: &Id) -> Option<GitId> {
@@ -109,7 +130,15 @@ impl GitMap {
             buf.extend_from_slice(copse.as_bytes());
             buf.extend_from_slice(git);
         }
+        // The objects these name go to disk first, so the map never outlives them.
+        crate::durable::flush_pending()?;
         let mut f = fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        // A record cut short (a crash or a full disk mid-append) is dropped before
+        // appending; otherwise every record after it would be read misaligned.
+        let len = f.metadata()?.len();
+        if len % RECORD != 0 {
+            f.set_len(len - len % RECORD)?;
+        }
         f.write_all(&buf)?;
         f.sync_all()?;
         self.pending.clear();

@@ -235,6 +235,17 @@ pub fn fsck() -> Result<()> {
         }
     }
 
+    // The copse <-> git id map, if this repository talks to git servers.
+    if repo.dir.join("gitmap").exists() {
+        let (torn, wrong) = crate::gitwire::GitMap::load(&repo)?.check(&repo.store);
+        if torn > 0 {
+            println!("note: the git id map (.copse/gitmap) ends in a record cut short ({torn} bytes); the next fetch or push drops it");
+        }
+        for (id, g) in &wrong {
+            println!("warning: the git id map gives {} for {}, but leads back from it to an object that isn't here", crate::gitwire::hex(g), short(id));
+            warnings += 1;
+        }
+    }
     let temps = leftover_temp_files(&repo);
     if !temps.is_empty() {
         println!("note: {} temporary file(s) left by interrupted writes; `copse gc` clears them", temps.len());

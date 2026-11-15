@@ -245,6 +245,9 @@ impl PackWriter {
         f.write_all(&idx)?;
         f.sync_all()?;
         fs::rename(&idx_tmp, self.dir.join(format!("pack-{name}.idx")))?;
+        // The two new names must be on disk before anything relies on them: a ref
+        // naming an object in the pack, or gc deleting what the pack replaces.
+        crate::durable::sync_dir(&self.dir)?;
         Ok(name)
     }
 }
