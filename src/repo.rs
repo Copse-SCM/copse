@@ -307,11 +307,18 @@ impl Repo {
     }
 
     /// Hold this working directory's operation lock until the result is dropped.
-    /// A command that reads the index and HEAD, then moves them (commit) takes it,
-    /// so a second one running at the same time can't build on what the first is
-    /// about to replace. A lock whose process has gone is taken over.
+    /// Every command that changes HEAD, branches, the index or your files takes it
+    /// (see `main`), so a second one running at the same time can't build on what
+    /// the first is about to replace. A lock whose process has gone is taken over.
+    ///
+    /// Commands the holder runs (hooks, `rebase -x`, `bisect run` scripts) inherit
+    /// `COPSE_OPERATION_LOCK`, naming the lock's owner; a copse they start shares
+    /// the lock instead of waiting for it, since its parent is waiting for it.
     pub fn lock_operation(&self, what: &str) -> Result<OpLock> {
         let path = self.wt.join("operation.lock");
+        if self.lock_is_ours(&path) {
+            return Ok(OpLock { path: None });
+        }
         // Another commit usually holds it for milliseconds, so wait a little for
         // our turn (git fails at once; scripts running commands side by side
         // shouldn't have to retry).
@@ -320,7 +327,8 @@ impl Repo {
             match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut f) => {
                     f.write_all(format!("{} {what}\n", std::process::id()).as_bytes())?;
-                    return Ok(OpLock { path });
+                    std::env::set_var(LOCK_OWNER, std::process::id().to_string());
+                    return Ok(OpLock { path: Some(path) });
                 }
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                     let text = fs::read_to_string(&path).unwrap_or_default();
@@ -351,6 +359,26 @@ impl Repo {
                 Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
             }
         }
+    }
+
+    /// The operation lock if it's free right now, else None (never waits). For
+    /// commands that only tidy up (status refreshing its stat cache), which would
+    /// rather skip that than wait or fail.
+    pub fn try_lock_operation(&self, what: &str) -> Option<OpLock> {
+        let path = self.wt.join("operation.lock");
+        if self.lock_is_ours(&path) {
+            return Some(OpLock { path: None });
+        }
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&path).ok()?;
+        f.write_all(format!("{} {what}\n", std::process::id()).as_bytes()).ok()?;
+        Some(OpLock { path: Some(path) })
+    }
+
+    /// Is the lock held by this process, or by the copse that started it?
+    fn lock_is_ours(&self, path: &Path) -> bool {
+        let Ok(owner) = std::env::var(LOCK_OWNER) else { return false };
+        let text = fs::read_to_string(path).unwrap_or_default();
+        text.split_whitespace().next() == Some(owner.as_str())
     }
 
     /// Resolve `HEAD`, a branch name, or a commit id prefix, optionally followed by `~N`.
@@ -495,6 +523,44 @@ impl Repo {
         }
         fs::create_dir_all(self.dir.join("tags"))?;
         write_atomic(&self.dir.join("tags").join(ref_file(name)), format!("{}\n", id.to_hex()).as_bytes())
+    }
+
+    /// Point a tag at `new`, but only if it still names `old` (None: doesn't exist
+    /// yet), checked under the tag's lock; for pushes, so two at once can't both
+    /// be told they made it.
+    pub fn cas_tag(&self, name: &str, old: Option<Id>, new: &Id) -> Result<()> {
+        validate_branch(name).with_context(|| format!("invalid tag name {name:?}"))?;
+        if old.is_none() {
+            check_clash(self.tags()?.into_iter().map(|(t, _)| t), name, "tag")?;
+        }
+        fs::create_dir_all(self.dir.join("tags"))?;
+        write_atomic_if(&self.dir.join("tags").join(ref_file(name)), format!("{}\n", new.to_hex()).as_bytes(), || {
+            if self.tag(name)? != old {
+                bail!("tag {name} has changed there since you looked");
+            }
+            Ok(())
+        })
+    }
+
+    /// Delete a tag, but only if it still names `old`, checked under its lock.
+    pub fn cas_delete_tag(&self, name: &str, old: &Id) -> Result<()> {
+        validate_branch(name).with_context(|| format!("invalid tag name {name:?}"))?;
+        let path = self.dir.join("tags").join(ref_file(name));
+        let lock = PathBuf::from(format!("{}.lock", path.display()));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => bail!("tag {name} is being updated by someone else; try again"),
+            Err(e) => return Err(e.into()),
+        }
+        let result = (|| {
+            if self.tag(name)? != Some(*old) {
+                bail!("tag {name} has changed there since you looked");
+            }
+            fs::remove_file(&path)?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&lock);
+        result
     }
 
     pub fn delete_tag(&self, name: &str) -> Result<bool> {
@@ -713,12 +779,17 @@ pub fn validate_remote(name: &str) -> Result<()> {
 /// folders, no empty folders left behind, no file-versus-folder clashes.
 /// A working directory's operation lock (`Repo::lock_operation`), released when dropped.
 pub struct OpLock {
-    path: PathBuf,
+    path: Option<PathBuf>, // None: shared with whoever already held it
 }
+
+/// Names the process holding the operation lock, for the commands it runs.
+const LOCK_OWNER: &str = "COPSE_OPERATION_LOCK";
 
 impl Drop for OpLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if let Some(path) = &self.path {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 

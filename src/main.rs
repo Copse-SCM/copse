@@ -806,6 +806,17 @@ fn main() {
     };
     // What the reflog records as the reason for any branch or HEAD move.
     reflog::set_reason(args[1..].join(" "));
+    // Commands that change HEAD, branches, tags, the index or your files run one
+    // at a time per working directory, so two can't each build on what the other
+    // is replacing (a commit landing during a merge, a reset during a stash).
+    let _lock = match changes_things(command).map(|what| repo::Repo::find().map(|r| r.lock_operation(what))) {
+        Some(Ok(Err(e))) => {
+            eprintln!("copse: {e:#}");
+            std::process::exit(1);
+        }
+        Some(Ok(Ok(lock))) => Some(lock),
+        _ => None, // not in a repository: the command says so itself
+    };
     let result = match command {
         Command::Init { dir, bare } => cmd::init(dir.as_deref(), *bare),
         Command::Clone { url, dir, depth, recurse, filter } => remote::clone(url, dir.clone(), *depth, *recurse, filter.as_deref()),
@@ -1005,4 +1016,32 @@ fn main() {
     if !matches!(command, Command::Serve { .. } | Command::GitView { .. } | Command::Ui { .. }) {
         gitview::after_command();
     }
+}
+
+/// The name a command holds the operation lock under, if it changes HEAD,
+/// branches, tags, the index or files. Pull takes it itself once it has fetched,
+/// so a slow download doesn't hold up commits; fetch, push and gc only add
+/// objects or move remote-tracking refs.
+fn changes_things(command: &Command) -> Option<&'static str> {
+    Some(match command {
+        Command::Submodule { action: Some(SubmoduleAction::Update { .. } | SubmoduleAction::Add { .. }) } => "submodule",
+        Command::Rebase { .. } => "rebase",
+        Command::Tag { name: Some(_), .. } => "tag",
+        Command::Restore { .. } => "restore",
+        Command::Reset { .. } => "reset",
+        Command::Undo => "undo",
+        Command::Commit { .. } => "commit",
+        Command::Lfs { action: LfsAction::Pull } => "lfs pull",
+        Command::Clean { force: true, .. } => "clean",
+        Command::Worktree { action: Some(WorktreeAction::Add { .. } | WorktreeAction::Remove { .. } | WorktreeAction::Prune) } => "worktree",
+        Command::Sparse { action: Some(_) } => "sparse",
+        Command::Bisect { action: Some(_) } => "bisect",
+        Command::CherryPick { .. } => "cherry-pick",
+        Command::Revert { .. } => "revert",
+        Command::Merge { .. } => "merge",
+        Command::Branch { name: Some(_), .. } => "branch",
+        Command::Checkout { .. } => "checkout",
+        Command::Stash { action: None | Some(StashAction::Pop { .. } | StashAction::Apply { .. } | StashAction::Drop { .. }), .. } => "stash",
+        _ => return None,
+    })
 }

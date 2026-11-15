@@ -135,6 +135,24 @@ for i in $(seq 1 20); do [[ $(cat "../code$i") == 0 ]] && echo "$log" | grep -qw
 echo "999999 commit" > .copse/operation.lock && echo x > x && cps commit -m x >/dev/null && ok "a lock left by a command that's gone is taken over" || fail "line $LINENO: a step before this check failed"
 cd ..
 
+echo "== commands that change things run one at a time"
+mkdir turns && cd turns && cps init >/dev/null && echo a > a && cps commit -m base >/dev/null && cps branch other >/dev/null
+echo m > m && cps commit -m M >/dev/null && cps checkout other >/dev/null && echo o > o && cps commit -m O >/dev/null && cps checkout main >/dev/null
+printf '#!/bin/sh\np=$(cat)\ncase "$p" in *"Merge "*) sleep 2;; esac\nprintf -- "-----BEGIN PGP SIGNATURE-----\\nAAAA\\n-----END PGP SIGNATURE-----\\n"\n' > ../slowsign && chmod +x ../slowsign
+cps config gpg.program "$PWD/../slowsign" >/dev/null && cps config commit.gpgsign true >/dev/null
+cps merge other >/dev/null 2>&1 & sleep 0.5
+echo important > work.txt && cps commit -m "important work" >/dev/null; wait
+same "$(cps log --format=%s -n 2 | tr '\n' ',')" "important work,Merge other into main," "a commit made while a merge is signing waits its turn, and lands on top instead of being lost"
+cps status | has "Nothing changed" && ok "and the index matches (no file left looking untracked)" || fail "line $LINENO: $(cps status)"
+cps config --unset commit.gpgsign >/dev/null
+mkdir -p .copse/hooks && printf '#!/bin/sh\n"%s" tag from-hook >/dev/null\n' "$COPSE" > .copse/hooks/post-commit && chmod +x .copse/hooks/post-commit
+echo h > h && start=$(date +%s) && cps commit -m hooked >/dev/null && [[ $(( $(date +%s) - start )) -lt 5 && -n "$(cps tag | grep from-hook)" ]] && ok "a copse command run by a hook shares its command's turn instead of waiting for it" || fail "line $LINENO: a step before this check failed"
+rm .copse/hooks/post-commit
+sleep 30 & holder=$!; echo "$holder merge" > .copse/operation.lock; echo h2 > h; touch -t 202001010000 h; before=$(ls -l .copse/index)
+cps status | has "M h" && [[ "$(ls -l .copse/index)" == "$before" && -e .copse/operation.lock ]] && ok "status still works while another command is busy, and leaves the index alone" || fail "line $LINENO: a step before this check failed"
+kill $holder; wait $holder 2>/dev/null || true; rm -f .copse/operation.lock
+cd ..
+
 echo "== edits that keep a file's size and modification time"
 mkdir samestat && cd samestat && cps init >/dev/null
 printf 'aaaa\n' > f && touch -t 202001010000 f && cps commit -m a >/dev/null && sleep 3 && cps status >/dev/null

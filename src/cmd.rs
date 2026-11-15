@@ -145,9 +145,15 @@ pub fn status(porcelain: bool) -> Result<()> {
     let files = snapshot(&repo.root, &index, None)?;
     let ch = changes(&index, &files);
     if refresh(&mut index, &files) {
-        // Only a cache of file timestamps: if another command is writing the index
-        // right now, skip saving rather than fail a read-only command.
-        let _ = index.save(&repo.wt);
+        // Only a cache of file timestamps, so it's saved only when that's safe:
+        // with no other command busy here (never waiting for one), and only if the
+        // index is still the one read above. Otherwise a pull that finished in the
+        // meantime would have its index replaced by this older one.
+        if let Some(_lock) = repo.try_lock_operation("status") {
+            if Index::load(&repo.wt).is_ok_and(|now| now.written_ns == index.written_ns) {
+                let _ = index.save(&repo.wt);
+            }
+        }
     }
     if porcelain {
         return status_porcelain(&repo, &ch);

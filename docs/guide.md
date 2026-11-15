@@ -473,6 +473,7 @@ Cloning or pulling someone else's repository is safe from the tricks git itself 
 - **Crash safety.** An object is flushed to disk (fsync) before it's renamed into place, and before any ref, HEAD or the index changes. Refs themselves are flushed fully (F_FULLFSYNC on macOS) and replaced in one rename. A crash can lose the last command's work, but it can't leave a branch pointing at a missing or half-written object. This costs about 10 ms on a commit. `COPSE_FSYNC=0` or `core.fsync = false` turns it off.
 - **Large files** (32 MB and up) are hashed, compressed, checked and checked out in 1 MB pieces. Memory use stays flat: a 100 MB or 200 MB file commits, packs, verifies and restores in under 10 MB. Pushing and cloning still hold one file's compressed form in memory at a time.
 - **State-file locks.** Replacing a ref, HEAD, the index or another state file requires creating its `.lock` file exclusively. If that lock already exists, the write fails without changing it; retry after the other operation finishes. A lock lives only while one file is written, so one older than five minutes was left by an interrupted operation: copse removes it (and says so) the next time it needs that file. `copse status` never fails over a busy index: it just skips saving its cache that time.
+- **One command at a time.** Commands that change HEAD, branches, tags, the index or your files (commit, checkout, merge, the part of pull after the download, rebase, cherry-pick, revert, reset, restore, stash, undo, bisect, clean, sparse checkout, worktrees, branch and tag changes) take turns in each working directory. One started while another is running waits for it (up to 10 seconds) rather than building on what the other is about to replace, so a commit made during a slow merge lands on top of it instead of being lost. A copse command run by one of them (a hook, `rebase -x`, a `bisect run` script) shares its turn. Read-only commands never wait, and `status` saves its cache only when nothing else is busy and the index hasn't changed under it. Tag pushes are checked against the tag's old value under its lock, as branch pushes are, so two pushes at once can't both be told they won.
 
 ## Why it's faster than git
 
@@ -591,7 +592,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `rebase.sh` | 78 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 35 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
-| `safety.sh` | 54 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
+| `safety.sh` | 58 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 24 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 32 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |

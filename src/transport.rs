@@ -746,7 +746,7 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
                 bail!("tag {tag} has changed there since you looked");
             }
             if deleting {
-                repo.delete_tag(tag)?;
+                repo.cas_delete_tag(tag, &old.context("there's no such tag to delete")?)?;
             } else {
                 let new = parse_hex(parts.next().context("bad tag request")?)?;
                 writeln!(w, "ready")?;
@@ -756,7 +756,7 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
                 if shallow != repo.shallow() {
                     repo.set_shallow(&shallow)?;
                 }
-                repo.set_tag(tag, &new)?;
+                repo.cas_tag(tag, old, &new)?;
             }
             writeln!(w, "ok")?;
         }
@@ -881,6 +881,23 @@ mod tests {
         assert_eq!(repo.branch("main").unwrap(), Some(old));
         assert!(repo.shallow().is_empty());
         assert!(!repo.dir.join("shallow").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tag_updates_only_land_on_the_value_they_saw() {
+        let (dir, repo, old) = push_repo("tag-cas");
+        let tree = repo.store.put(Kind::Tree, &encode_tree(&[])).unwrap();
+        let other = repo.store.put(Kind::Commit, &Commit::new(tree, vec![old], "other".into()).encode()).unwrap();
+        repo.cas_tag("v1", None, &old).unwrap();
+        // A second "create" (it saw no tag) loses, as does a move or delete from a stale value.
+        assert!(repo.cas_tag("v1", None, &other).is_err());
+        assert!(repo.cas_tag("v1", Some(other), &other).is_err());
+        assert!(repo.cas_delete_tag("v1", &other).is_err());
+        assert_eq!(repo.tag("v1").unwrap(), Some(old));
+        repo.cas_tag("v1", Some(old), &other).unwrap();
+        repo.cas_delete_tag("v1", &other).unwrap();
+        assert_eq!(repo.tag("v1").unwrap(), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

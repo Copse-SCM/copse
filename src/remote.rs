@@ -251,6 +251,8 @@ pub fn pull(remote: &str, branch: Option<&str>, rebase: bool, strategy: crate::m
         None => current_branch(&repo)?,
     };
     fetch_all(&repo, remote, Depth::Full)?;
+    // Only now, with the download done, does pull hold up other commands.
+    let _lock = repo.lock_operation("pull")?;
     let theirs = repo.tracking(remote, &branch)?.with_context(|| format!("{remote} has no branch called {branch}"))?;
 
     if repo.head_commit()?.is_none() {

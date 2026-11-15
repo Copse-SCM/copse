@@ -495,8 +495,8 @@ fn apply(repo: &Repo, map: &GitMap, old: GitId, new: GitId, refname: &str, allow
             repo.cas_delete_branch(&name, &old)
         }
         (_, Some(n), false) => repo.cas_branch(&name, current, &n),
-        (Some(_), None, true) => repo.delete_tag(&name).map(|_| ()),
-        (_, Some(n), true) => repo.set_tag(&name, &n),
+        (Some(old), None, true) => repo.cas_delete_tag(&name, &old),
+        (_, Some(n), true) => repo.cas_tag(&name, current, &n),
         (None, None, _) => Err(anyhow::anyhow!("this ref does not exist, so it can't be deleted")),
     };
     match done {
