@@ -102,7 +102,7 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
         // removed or written without going wherever the link points.
         if let Some(link) = crate::cmd::symlink_on_the_way(&repo.root, path).filter(|l| !leaving.contains(l.as_str())) {
             if before.is_some() || after.is_some_and(|_| !sparse.outside(path)) {
-                through_links.push(format!("{path} ({link} is a symlink here)"));
+                through_links.push(format!("{} ({link} is a symlink here)", crate::objects::quote_path(path)));
                 continue;
             }
         }
@@ -111,12 +111,12 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
             (Some(e), Some(_)) => {
                 let absent_by_design = !on_disk && (sparse.outside(path) || e.mode == Mode::Submodule);
                 if !absent_by_design && !unchanged_on_disk(repo, index, path, e)? {
-                    in_the_way.push(format!("{path} (changed here)"));
+                    in_the_way.push(format!("{} (changed here)", crate::objects::quote_path(path)));
                 }
             }
             // A file the pull adds, where an untracked file already is.
             (None, None) if on_disk && !fs::metadata(crate::objects::disk_path(&repo.root, path)).is_ok_and(|m| m.is_dir()) => {
-                in_the_way.push(format!("{path} (untracked here)"));
+                in_the_way.push(format!("{} (untracked here)", crate::objects::quote_path(path)));
             }
             _ => {}
         }

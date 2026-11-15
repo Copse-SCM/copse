@@ -90,7 +90,7 @@ fn status_porcelain(repo: &Repo, ch: &Changes) -> Result<()> {
     lines.sort();
     for (p, k) in lines {
         let k = if conflicted.iter().any(|c| c == p) { 'C' } else { k };
-        println!("{k} {p}");
+        println!("{k} {}", crate::objects::quote_path(p));
     }
     Ok(())
 }
@@ -102,7 +102,7 @@ pub(crate) fn print_changes(ch: &Changes) {
     lines.extend(ch.deleted.iter().map(|p| (p.as_str(), 'D', "31")));
     lines.sort_unstable();
     for (path, tag, color) in lines {
-        println!("  {} {path}", paint(color, &tag.to_string()));
+        println!("  {} {}", paint(color, &tag.to_string()), crate::objects::quote_path(path));
     }
 }
 
@@ -178,7 +178,7 @@ pub fn status(porcelain: bool) -> Result<()> {
         let unresolved = m.unresolved(&repo);
         println!("Merging {} ({} file(s) still have conflict markers)", m.label, unresolved.len());
         for p in &unresolved {
-            println!("  {} {p}", paint("31", "C"));
+            println!("  {} {}", paint("31", "C"), crate::objects::quote_path(p));
         }
         println!("Fix the conflicts, then run `copse commit`. To give up, run `copse merge --abort`.");
     }
@@ -195,7 +195,7 @@ pub fn status(porcelain: bool) -> Result<()> {
         }
         let unresolved = r.unresolved(&repo);
         for p in &unresolved {
-            println!("  {} {p}", paint("31", "C"));
+            println!("  {} {}", paint("31", "C"), crate::objects::quote_path(p));
         }
         if unresolved.is_empty() && !r.conflicts.is_empty() {
             println!("Conflicts are fixed: run `copse {} --continue`.", r.op.name());
@@ -271,7 +271,7 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
         let unresolved = m.unresolved(&repo);
         if !unresolved.is_empty() {
             for p in &unresolved {
-                println!("  {} {p}", paint("31", "C"));
+                println!("  {} {}", paint("31", "C"), crate::objects::quote_path(p));
             }
             bail!("{} file(s) still have conflict markers; fix them before committing", unresolved.len());
         }

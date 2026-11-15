@@ -464,6 +464,7 @@ Cloning or pulling someone else's repository is safe from the tricks git itself 
   A hostile repository can't make a checkout write outside your project or over copse's data. A folder that lists the same name twice is refused too.
 - **They're checked on arrival, too.** Every folder listing received over copse's protocol (a push into a shared repository, a fetch, a partial clone's downloads) is checked before it's stored. A hostile push is refused outright rather than planted for someone else to trip over.
 - **Nothing goes through a symlinked folder.** If a folder on the way to a file is a link (say you replaced `vendor/` with a link to a shared checkout), copse never reads, writes or deletes the file through it, since that would touch whatever the link points at, perhaps outside the project. To copse the file simply isn't there. A checkout, pull, merge or `sparse set` that would have to write or delete it is refused before anything changes. Symlinks are written last, one at a time, so a link can't appear on a path while a file is being written along it.
+- **File names can't take over your terminal.** A name with control characters (an escape sequence could retitle or clear the terminal, or hide what's around it) is shown quoted, as git shows it: `"evil\033]0;..."`. That goes for `status`, `diff`, `show`, `log --stat`, `ls-files`, `grep`, `clean`, conflict lists and error messages.
 - **Names that differ only in case.** On a disk that ignores case (macOS, Windows), a symlink `A` and a folder `a` are the same entry, so a file under `a/` would be written through the link. A checkout that has both is refused before anything is written. Two files that differ only in case (`README` and `readme`) are allowed with a warning, as git does, since only one of them can exist on such a disk.
 - **Addresses can't smuggle in options.** An SSH address whose host starts with `-` (like `-oProxyCommand=…`) is refused before ssh is started, and so is a submodule URL starting with `-`.
 
@@ -595,7 +596,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `remote.sh` | 38 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
 | `safety.sh` | 59 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
-| `security.sh` | 24 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
+| `security.sh` | 27 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 36 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |
 | `tui.sh` | 78 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |

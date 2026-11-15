@@ -597,7 +597,7 @@ pub fn merge_octopus(targets: &[String], message: Option<&str>) -> Result<()> {
         let (result, conflicts) = merge_trees(&repo, &base_tree, &merged, &theirs_tree, &ours_label, t)?;
         if !conflicts.is_empty() {
             for (path, reason) in &conflicts {
-                println!("  {} {path}  {}", paint("31", "C"), paint("2", reason));
+                println!("  {} {}  {}", paint("31", "C"), crate::objects::quote_path(path), paint("2", reason));
             }
             bail!("merging {t} conflicts, and a merge of several branches at once can't stop for conflicts (git's can't either). Nothing was changed; merge them one at a time");
         }
@@ -709,7 +709,7 @@ pub fn merge_with(target: Option<&str>, abort: bool, ff: FastForward, message: O
 
     println!("Merging {target} into {ours_label}: {} conflict(s)", conflicts.len());
     for (path, reason) in &conflicts {
-        println!("  {} {path}  {}", paint("31", "C"), paint("2", reason));
+        println!("  {} {}  {}", paint("31", "C"), crate::objects::quote_path(path), paint("2", reason));
     }
     println!("Fix the conflicts, then run `copse commit`. To give up, run `copse merge --abort`.");
     Ok(())

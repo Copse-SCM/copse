@@ -121,6 +121,16 @@ out=$(cps clone --recurse-submodules "$WORK/sm.git" victim 2>&1) || true
 [[ "$out" == *"refusing the submodule URL"* && ! -e pwned && ! -e victim/pwned ]] && ok "a submodule URL starting with - is refused" || fail "$out"
 rm -rf victim
 
+echo "== file names that would take over your terminal"
+rm -rf escrepo escw && git init -q -b main escrepo && evil="$(printf 'evil\033]0;pwned\007\033[2Jx')"
+(cd escrepo && echo hit > "$evil" && echo a > a && git add -A && git commit -qm "hostile name")
+cps clone "$WORK/escrepo" escw >/dev/null && cd escw && echo more >> "$evil" && echo untracked > "$(printf 'new\033[31m')"
+out=$({ cps status; cps diff; cps show --stat; cps log --stat -n 1; cps ls-files; cps grep hit; cps clean; cps diff --stat; } 2>&1)
+[[ "$out" != *$'\033'* && "$out" != *$'\007'* ]] && ok "status, diff, show, log, ls-files, grep and clean never print a name's escape sequences" || fail "line $LINENO: raw escape in: $(printf '%s' "$out" | cat -v)"
+cps status | has 'M "evil\033]0;pwned\a\033[2Jx"' && ok "they quote it the way git does" || fail "line $LINENO: $(cps status | cat -v)"
+out=$(cps checkout nope-$'\033[2J' 2>&1 || true); [[ "$out" != *$'\033'* ]] && ok "and errors escape them too" || fail "line $LINENO: $(printf '%s' "$out" | cat -v)"
+cd ..
+
 echo "== your own files"
 mkdir mine && cd mine && cps init >/dev/null && echo ok > ok.txt && echo x > "copse~1"
 expect_fail "committing a file whose name Windows would treat as .copse is refused" "unsafe file name" cps commit -m x

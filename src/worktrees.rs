@@ -199,7 +199,7 @@ fn remove(repo: &Repo, path: &str, force: bool) -> Result<()> {
         let nested = crate::worktree::nested_repos(&other.root, &index);
         if !nested.is_empty() {
             for p in &nested {
-                println!("  {p}");
+                println!("  {}", crate::objects::quote_path(p));
             }
             bail!("that worktree has {} repository(s) inside it, with their own files and history; move them out, or use --force to delete them too", nested.len());
         }

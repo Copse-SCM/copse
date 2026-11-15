@@ -70,9 +70,9 @@ fn tree_lines(store: &Store, tree: &Id, prefix: &str, recursive: bool, dirs_only
             continue;
         }
         if name_only {
-            writeln!(out, "{path}")?;
+            writeln!(out, "{}", crate::objects::quote_path(&path))?;
         } else {
-            writeln!(out, "{} {} {}\t{path}", git_mode(e.mode), entry_type(e.mode), entry_id(e.mode, &e.id))?;
+            writeln!(out, "{} {} {}\t{}", git_mode(e.mode), entry_type(e.mode), entry_id(e.mode, &e.id), crate::objects::quote_path(&path))?;
         }
     }
     Ok(())
@@ -237,9 +237,9 @@ pub fn ls_tree(rev: &str, path: Option<&str>, recursive: bool, dirs_only: bool, 
             if mode == Mode::Dir && recursive {
                 tree_lines(&repo.store, &eid, &format!("{p}/"), true, dirs_only, name_only, &mut out)?;
             } else if name_only {
-                writeln!(out, "{p}")?;
+                writeln!(out, "{}", crate::objects::quote_path(&p))?;
             } else {
-                writeln!(out, "{} {} {}\t{p}", git_mode(mode), entry_type(mode), entry_id(mode, &eid))?;
+                writeln!(out, "{} {} {}\t{}", git_mode(mode), entry_type(mode), entry_id(mode, &eid), crate::objects::quote_path(&p))?;
             }
         }
     }
@@ -256,7 +256,7 @@ pub fn ls_files(modified: bool, deleted: bool, others: bool) -> Result<()> {
     let mut out = Vec::new();
     if !modified && !deleted && !others {
         for p in index.entries.keys() {
-            writeln!(out, "{p}")?;
+            writeln!(out, "{}", crate::objects::quote_path(&p))?;
         }
     } else {
         let files = crate::worktree::snapshot(&repo.root, &index, None)?;
@@ -274,7 +274,7 @@ pub fn ls_files(modified: bool, deleted: bool, others: bool) -> Result<()> {
         list.sort();
         list.dedup();
         for p in list {
-            writeln!(out, "{p}")?;
+            writeln!(out, "{}", crate::objects::quote_path(&p))?;
         }
     }
     std::io::stdout().write_all(&out)?;

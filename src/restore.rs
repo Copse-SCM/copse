@@ -120,7 +120,7 @@ pub fn restore(paths: &[String], from: Option<&str>) -> Result<()> {
     let where_from = if from.is_some() { format!("{rev} ({})", short(&source)) } else { "the last commit".to_string() };
     println!("Restored {} file(s) from {where_from}:", to_write.len());
     for path in to_write.keys().take(20) {
-        println!("  {path}");
+        println!("  {}", crate::objects::quote_path(path));
     }
     if to_write.len() > 20 {
         println!("  ... and {} more", to_write.len() - 20);

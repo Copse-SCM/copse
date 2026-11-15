@@ -796,7 +796,7 @@ fn main() {
         use std::io::IsTerminal;
         if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
             if let Err(e) = tui::run() {
-                eprintln!("copse: {e:#}");
+                eprintln!("copse: {}", printable(&format!("{e:#}")));
                 std::process::exit(1);
             }
         } else {
@@ -811,7 +811,7 @@ fn main() {
     // is replacing (a commit landing during a merge, a reset during a stash).
     let _lock = match changes_things(command).map(|what| repo::Repo::find().map(|r| r.lock_operation(what))) {
         Some(Ok(Err(e))) => {
-            eprintln!("copse: {e:#}");
+            eprintln!("copse: {}", printable(&format!("{e:#}")));
             std::process::exit(1);
         }
         Some(Ok(Ok(lock))) => Some(lock),
@@ -1009,7 +1009,7 @@ fn main() {
         Command::Checkout { target, force } => cmd::checkout(target, *force),
     };
     if let Err(e) = result {
-        eprintln!("copse: {e:#}");
+        eprintln!("copse: {}", printable(&format!("{e:#}")));
         std::process::exit(1);
     }
     // Keep the .git view (if there is one) in step with whatever just changed.
@@ -1044,4 +1044,22 @@ fn changes_things(command: &Command) -> Option<&'static str> {
         Command::Stash { action: None | Some(StashAction::Pop { .. } | StashAction::Apply { .. } | StashAction::Drop { .. }), .. } => "stash",
         _ => return None,
     })
+}
+
+/// An error message as it's safe to print: it may quote a file name from a
+/// repository you cloned, so control characters other than line breaks (an
+/// escape sequence could retitle or clear the terminal) are shown escaped.
+fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(|c| c.is_control() && c != '\n') {
+        return text.into();
+    }
+    text.chars()
+        .map(|c| match c {
+            '\n' => "\n".to_string(),
+            '\t' => "\\t".to_string(),
+            c if c.is_control() => c.encode_utf8(&mut [0; 4]).bytes().map(|b| format!("\\{b:03o}")).collect(),
+            c => c.to_string(),
+        })
+        .collect::<String>()
+        .into()
 }

@@ -895,7 +895,7 @@ fn run_step(repo: &Repo, state: &mut RebaseState) -> Result<bool> {
             state.save(repo)?;
             println!("Conflict while applying {} {title} ({}/{}):", short(&id), state.done + 1, state.total);
             for (path, reason) in &conflicts {
-                println!("  {} {path}  {}", paint("31", "C"), paint("2", reason));
+                println!("  {} {}  {}", paint("31", "C"), crate::objects::quote_path(path), paint("2", reason));
             }
             println!("{}", how_to_go_on(state.op));
             return Ok(false);
@@ -1038,7 +1038,7 @@ fn continue_rebase(repo: &Repo) -> Result<()> {
     let unresolved = state.unresolved(repo);
     if !unresolved.is_empty() {
         for p in &unresolved {
-            println!("  {} {p}", paint("31", "C"));
+            println!("  {} {}", paint("31", "C"), crate::objects::quote_path(p));
         }
         bail!("{} file(s) still have conflict markers; fix them, then run `copse rebase --continue` again", unresolved.len());
     }

@@ -558,7 +558,7 @@ pub fn lfs(cmd: LfsCmd) -> Result<()> {
                 }
                 if let Some(p) = pointers_in(&repo, &[id])?.into_iter().next() {
                     let mark = if cached(&repo.dir, &p) { "*" } else { "-" };
-                    println!("{} {mark} {path}  ({} bytes)", &p.oid[..10], p.size);
+                    println!("{} {mark} {}  ({} bytes)", &p.oid[..10], crate::objects::quote_path(&path), p.size);
                 }
             }
         }

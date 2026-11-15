@@ -175,8 +175,8 @@ pub fn submodule(cmd: SubmoduleCmd) -> Result<()> {
                 let hex = gitlink_hex(&pin);
                 let dir = crate::objects::disk_path(&repo.root, &path);
                 match head_gitlink(&dir) {
-                    None => println!("-{}  {path}  {}", &hex[..10], paint("2", "(not checked out; `copse submodule update --init`)")),
-                    Some(now) if now == pin => println!(" {}  {path}", &hex[..10]),
+                    None => println!("-{}  {}  {}", &hex[..10], crate::objects::quote_path(&path), paint("2", "(not checked out; `copse submodule update --init`)")),
+                    Some(now) if now == pin => println!(" {}  {}", &hex[..10], crate::objects::quote_path(&path)),
                     Some(now) => println!(
                         "+{}  {path}  {}",
                         &gitlink_hex(&now)[..10],
@@ -192,7 +192,7 @@ pub fn submodule(cmd: SubmoduleCmd) -> Result<()> {
             }
             for (path, pin) in subs {
                 let what = update_one(&repo, &path, &pin, url_of(&path).as_deref(), init)?;
-                println!("  {path}: {what}");
+                println!("  {}: {what}", crate::objects::quote_path(&path));
             }
         }
         SubmoduleCmd::Add { url, path } => {

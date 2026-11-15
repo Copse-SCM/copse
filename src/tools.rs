@@ -41,10 +41,10 @@ pub fn clean(force: bool, ignored: bool, paths: &[String]) -> Result<()> {
 
     let verb = if force { "Removing" } else { "Would remove" };
     for p in &new_files {
-        println!("{verb} {p}");
+        println!("{verb} {}", crate::objects::quote_path(p));
     }
     for p in &ignored_files {
-        println!("{verb} {p} {}", paint("2", "(ignored)"));
+        println!("{verb} {} {}", crate::objects::quote_path(p), paint("2", "(ignored)"));
     }
     if !force {
         println!("Run `copse clean -f` to remove them.");
@@ -127,7 +127,7 @@ pub fn grep(args: GrepArgs) -> Result<()> {
         std::process::exit(1);
     }
     for (path, hits) in &results {
-        let shown = paint("35", &format!("{prefix}{path}"));
+        let shown = paint("35", &crate::objects::quote_path(&format!("{prefix}{path}")));
         if args.files_only {
             println!("{shown}");
         } else if args.count {

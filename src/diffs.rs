@@ -133,7 +133,7 @@ fn line_counts(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
 }
 
 fn print_file(ch: &FileChange, a: &[u8], b: &[u8]) {
-    println!("{}", paint("1", &format!("diff {}", ch.path)));
+    println!("{}", paint("1", &format!("diff {}", crate::objects::quote_path(&ch.path))));
     match (ch.old, ch.new) {
         (None, Some((m, _))) => println!("new file, mode {}", git_mode(m)),
         (Some((m, _)), None) => println!("deleted file, mode {}", git_mode(m)),
@@ -147,8 +147,8 @@ fn print_file(ch: &FileChange, a: &[u8], b: &[u8]) {
         println!("Binary file differs");
         return;
     };
-    let a_name = if ch.old.is_some() { format!("a/{}", ch.path) } else { "/dev/null".into() };
-    let b_name = if ch.new.is_some() { format!("b/{}", ch.path) } else { "/dev/null".into() };
+    let a_name = if ch.old.is_some() { crate::objects::quote_path(&format!("a/{}", ch.path)).into_owned() } else { "/dev/null".into() };
+    let b_name = if ch.new.is_some() { crate::objects::quote_path(&format!("b/{}", ch.path)).into_owned() } else { "/dev/null".into() };
     let text = TextDiff::from_lines(a_text, b_text).unified_diff().context_radius(3).header(&a_name, &b_name).to_string();
     for line in text.lines() {
         let colored = if line.starts_with("+++") || line.starts_with("---") {
@@ -171,12 +171,13 @@ fn print_stat(stats: &[(String, Option<(usize, usize)>)]) {
     if stats.is_empty() {
         return;
     }
+    let stats: Vec<(String, Option<(usize, usize)>)> = stats.iter().map(|(p, c)| (crate::objects::quote_path(p).into_owned(), *c)).collect();
     let width = stats.iter().map(|(p, _)| p.chars().count()).max().unwrap_or(0);
     let most = stats.iter().filter_map(|(_, c)| c.map(|(i, d)| i + d)).max().unwrap_or(0);
     let num_width = most.to_string().len();
     const BAR: usize = 40;
     let (mut total_ins, mut total_del) = (0, 0);
-    for (path, counts) in stats {
+    for (path, counts) in &stats {
         match counts {
             None => println!(" {path:<width$} | {:>num_width$}", "Bin"),
             Some((ins, del)) => {

@@ -249,7 +249,7 @@ pub fn text(data: &[u8]) -> Option<&str> {
 }
 
 fn show_hunk(path: &str, h: &Hunk, n: usize, of: usize) {
-    println!("{} {}  {}", paint("1", path), paint("36", &h.header), paint("2", &format!("(change {n} of {of})")));
+    println!("{} {}  {}", paint("1", &crate::objects::quote_path(path)), paint("36", &h.header), paint("2", &format!("(change {n} of {of})")));
     for l in &h.lines {
         let s = format!("{}{}", l.mark, l.text);
         println!("{}", match l.mark {

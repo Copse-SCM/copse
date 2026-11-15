@@ -951,6 +951,16 @@ mod name_tests {
     use super::*;
 
     #[test]
+    fn paths_are_quoted_as_git_quotes_them() {
+        assert_eq!(quote_path("src/main.rs"), "src/main.rs");
+        assert_eq!(quote_path("café/naïve.txt"), "café/naïve.txt");
+        assert_eq!(quote_path("evil\x1b]0;pwned\x07\x1b[2Jx"), "\"evil\\033]0;pwned\\a\\033[2Jx\"");
+        assert_eq!(quote_path("tab\there"), "\"tab\\there\"");
+        assert_eq!(quote_path("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(quote_path("c1\u{9b}x"), "\"c1\\302\\233x\"");
+    }
+
+    #[test]
     fn unsafe_names_are_refused() {
         for bad in ["", ".", "..", "a/b", "a\0b", ".copse", ".COPSE", ".Copse.", ".copse ", "copse~1", ".git", ".GIT", ".git...", "GIT~1",
                     ".g\u{200c}it", ".\u{feff}copse"] {
@@ -1021,6 +1031,41 @@ pub fn to_git_bytes(s: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// A file path as it's safe to print, quoted the way git quotes it: a name with a
+/// control character (an escape sequence could retitle or clear the terminal,
+/// or hide what's around it), a double quote or a backslash is shown in double
+/// quotes with C escapes (`\t`, `\n`, `\033`...). Other names, including ones
+/// that aren't ASCII, are shown as they are (git's `core.quotePath = false`).
+pub fn quote_path(path: &str) -> std::borrow::Cow<'_, str> {
+    if !path.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    let mut out = String::with_capacity(path.len() + 8);
+    out.push('"');
+    for c in path.chars() {
+        match c {
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\x0b' => out.push_str("\\v"),
+            '\x0c' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("\\{b:03o}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    std::borrow::Cow::Owned(out)
 }
 
 /// Where a file of the repository lives on disk. A name with bytes that aren't

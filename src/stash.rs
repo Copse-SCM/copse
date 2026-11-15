@@ -256,7 +256,7 @@ pub fn apply(n: usize, keep: bool) -> Result<()> {
     let in_the_way: Vec<&String> = ch.added.iter().chain(&ch.modified).chain(&ch.deleted).filter(|p| touched.contains(p)).collect();
     if !in_the_way.is_empty() {
         for p in &in_the_way {
-            println!("  {p}");
+            println!("  {}", crate::objects::quote_path(p));
         }
         bail!("stash {n} changes {} file(s) you've also changed; commit or stash those first", in_the_way.len());
     }
@@ -278,7 +278,7 @@ pub fn apply(n: usize, keep: bool) -> Result<()> {
     if !conflicts.is_empty() {
         println!("Brought back stash {n} with {} conflict(s):", conflicts.len());
         for (path, reason) in &conflicts {
-            println!("  {} {path}  {}", paint("31", "C"), paint("2", reason));
+            println!("  {} {}  {}", paint("31", "C"), crate::objects::quote_path(path), paint("2", reason));
         }
         println!("Fix the conflict markers in those files. The stash was kept, so nothing is lost;");
         println!("drop it with `copse stash drop {n}` once you're happy.");

@@ -107,7 +107,7 @@ fn apply(repo: &Repo, old: &Sparse, new: &Sparse) -> Result<(usize, usize)> {
         ch.added.iter().chain(&ch.modified).filter(|p| new.outside(p) && crate::objects::disk_path(&repo.root, p.as_str()).exists()).collect();
     if !at_risk.is_empty() {
         for p in &at_risk {
-            println!("  {p}");
+            println!("  {}", crate::objects::quote_path(p));
         }
         bail!("commit or stash your changes to {} file(s) outside those folders first", at_risk.len());
     }
@@ -124,14 +124,14 @@ fn apply(repo: &Repo, old: &Sparse, new: &Sparse) -> Result<(usize, usize)> {
             to_remove.push(path);
         } else if !new.outside(path) && !on_disk && (old.outside(path) || !ch.deleted.contains(path)) {
             match link {
-                Some(link) => through_links.push(format!("{path} ({link} is a symlink here)")),
+                Some(link) => through_links.push(format!("{} ({link} is a symlink here)", crate::objects::quote_path(path))),
                 None => to_write.push((path, *mode, *id)),
             }
         }
     }
     if !through_links.is_empty() {
         for p in &through_links {
-            println!("  {p}");
+            println!("  {}", crate::objects::quote_path(p));
         }
         bail!("{} file(s) would have to be written through a symlink; replace the link with a real folder (or leave that folder out) and try again. Nothing was changed", through_links.len());
     }
