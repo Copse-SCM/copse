@@ -51,7 +51,10 @@ cps branch -m old older | has "Renamed branch old to older" && same "$(branches)
 cps branch -m trunk >/dev/null && same "$(cps status | head -1)" "On branch trunk" "rename the current branch: you stay on it" || fail "line $LINENO: a step before this check failed"
 same "$(branches)" "older,trunk" "old name gone"
 expect_fail "rename onto an existing name is refused" "already exists" cps branch -m older trunk
-cps branch -M older trunk >/dev/null && same "$(branches)" "trunk" "-M replaces it" || fail "line $LINENO: a step before this check failed"
+tip=$(cps rev-parse trunk)
+expect_fail "-M won't replace the branch you're on (its commits would be lost)" "you're on trunk" cps branch -M older trunk
+same "$(branches) $(cps rev-parse trunk)" "older,trunk $tip" "and both branches stay as they were"
+cps checkout older >/dev/null && cps branch -M older trunk >/dev/null && same "$(branches) $(cps status | head -1)" "trunk On branch trunk" "-M replaces another branch (here, renaming the one you're on)" || fail "line $LINENO: a step before this check failed"
 cps checkout trunk >/dev/null && echo more >> base.txt && cps commit -m more >/dev/null && ok "commits keep working after renames" || fail "line $LINENO: a step before this check failed"
 cps branch -m main >/dev/null
 

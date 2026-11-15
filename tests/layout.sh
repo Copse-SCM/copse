@@ -124,6 +124,8 @@ expect_fail "a branch can't be checked out in two worktrees" "checked out in the
 cd ../src
 expect_fail "nor deleted while another worktree has it" "checked out in the worktree at $WORK/feature" cps branch -D feature
 expect_fail "nor renamed from elsewhere" "checked out in the worktree" cps branch -m feature feat2
+cps branch spare >/dev/null && expect_fail "nor replaced with -M" "checked out in the worktree at $WORK/feature" cps branch -M spare feature
+cps branch -D spare >/dev/null
 expect_fail "worktree add refuses a branch that's in use" "already checked out" cps worktree add ../dup main
 cps worktree add ../old v0.5 >/dev/null && same "$(cd ../old && cps status | head -1 | cut -c1-17)" "HEAD detached at " "a worktree can be on a tag or commit, detached" || fail "line $LINENO: a step before this check failed"
 same "$(cps worktree list | wc -l | tr -d ' ')" "3" "worktree list shows all three"

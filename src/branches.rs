@@ -128,6 +128,15 @@ fn rename(repo: &Repo, old: &str, new: &str, force: bool) -> Result<()> {
         bail!("{old} is checked out in the worktree at {}; rename it from there", other.display());
     }
     if repo.branch(new)?.is_some() {
+        // -M replaces `new`, so it needs the same care as deleting it: a branch
+        // that's checked out can't vanish from under its files (git refuses too).
+        if current_branch(repo)?.as_deref() == Some(new) {
+            bail!("you're on {new}, so it can't be replaced; switch to another branch first (or rename {new} out of the way)");
+        }
+        if let Some(other) = crate::worktrees::checked_out_elsewhere(repo, new)? {
+            bail!("{new} is checked out in the worktree at {}, so it can't be replaced; switch that worktree to another branch first", other.display());
+        }
+        not_mid_rebase(repo, new)?;
         repo.delete_branch(new)?; // -M: the replaced branch's history stays findable
     }
     repo.rename_branch(old, new)?;
