@@ -246,13 +246,18 @@ pub fn pull(remote: &str, branch: Option<&str>, rebase: bool, strategy: crate::m
         bail!("-s ours doesn't go with --rebase");
     }
     let repo = Repo::find()?;
+    let given = branch;
     let branch = match branch {
         Some(b) => b.to_string(),
         None => current_branch(&repo)?,
     };
     fetch_all(&repo, remote, Depth::Full)?;
-    // Only now, with the download done, does pull hold up other commands.
+    // Only now, with the download done, does pull hold up other commands. One may
+    // have switched branches meanwhile: then this pull was for another branch.
     let _lock = repo.lock_operation("pull")?;
+    if given.is_none() && current_branch(&repo)? != branch {
+        bail!("you switched branches while pull was downloading (it was pulling {branch}); the download is kept, so run `copse pull` again to pull into the branch you're on now");
+    }
     let theirs = repo.tracking(remote, &branch)?.with_context(|| format!("{remote} has no branch called {branch}"))?;
 
     if repo.head_commit()?.is_none() {

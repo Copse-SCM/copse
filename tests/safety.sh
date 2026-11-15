@@ -104,7 +104,7 @@ same "$times" "$pack_time " "carrying the pack's age, so they still expire a wee
 cps fsck | has "everything is intact" && ok "nothing needed was lost" || fail "line $LINENO: a step before this check failed"
 
 echo "== crash safety"
-[[ -z "$(find .copse -name '*.lock')" ]] && ok "no half-written state files are left behind" || fail "line $LINENO: a step before this check failed"
+[[ -z "$(find .copse -name '*.lock' -not -name operation.lock)" ]] && ok "no half-written state files are left behind (operation.lock stays: it's held with an OS lock)" || fail "line $LINENO: a step before this check failed"
 echo f > f.txt && COPSE_FSYNC=0 cps commit -m "no fsync" >/dev/null && cps fsck >/dev/null && ok "COPSE_FSYNC=0 turns flushing off (for test runs)" || fail "line $LINENO: a step before this check failed"
 cps config core.fsync false >/dev/null && echo g > g.txt && cps commit -m "core.fsync false" >/dev/null && cps config --unset core.fsync >/dev/null && ok "and so does core.fsync = false" || fail "line $LINENO: a step before this check failed"
 # An interrupted object write leaves only a temp file: never a damaged object under a real id.
@@ -131,8 +131,10 @@ for i in $(seq 1 20); do echo "$i" > "p$i"; done
 for i in $(seq 1 20); do (cps commit "p$i" -m "p$i" >/dev/null 2>&1; echo $? > "../code$i") & done; wait
 log=$(cps log --oneline -100); lost=""
 for i in $(seq 1 20); do [[ $(cat "../code$i") == 0 ]] && echo "$log" | grep -qw "p$i" || lost+=" p$i"; done
-[[ -z "$lost" && $(echo "$log" | wc -l) -eq 21 && ! -e .copse/operation.lock ]] && ok "20 commits started at once all succeed, and every one is on the branch" || fail "lost or failed:$lost"
-echo "999999 commit" > .copse/operation.lock && echo x > x && cps commit -m x >/dev/null && ok "a lock left by a command that's gone is taken over" || fail "line $LINENO: a step before this check failed"
+[[ -z "$lost" && $(echo "$log" | wc -l) -eq 21 ]] && ok "20 commits started at once all succeed, and every one is on the branch" || fail "lost or failed:$lost"
+echo "999999 commit" > .copse/operation.lock && echo x > x && cps commit -m x >/dev/null && ok "a lock file naming a command that's gone (a crash) doesn't stop anything" || fail "line $LINENO: a step before this check failed"
+cps checkout nosuch >/dev/null 2>&1 || true; start=$(date +%s)
+echo y > y && cps commit -m y >/dev/null && [[ $(( $(date +%s) - start )) -lt 3 ]] && ok "nor does a command that failed: the next one goes ahead at once" || fail "line $LINENO: a commit after a failed command waited or failed"
 cd ..
 
 echo "== commands that change things run one at a time"
@@ -148,9 +150,12 @@ cps config --unset commit.gpgsign >/dev/null
 mkdir -p .copse/hooks && printf '#!/bin/sh\n"%s" tag from-hook >/dev/null\n' "$COPSE" > .copse/hooks/post-commit && chmod +x .copse/hooks/post-commit
 echo h > h && start=$(date +%s) && cps commit -m hooked >/dev/null && [[ $(( $(date +%s) - start )) -lt 5 && -n "$(cps tag | grep from-hook)" ]] && ok "a copse command run by a hook shares its command's turn instead of waiting for it" || fail "line $LINENO: a step before this check failed"
 rm .copse/hooks/post-commit
-sleep 30 & holder=$!; echo "$holder merge" > .copse/operation.lock; echo h2 > h; touch -t 202001010000 h; before=$(ls -l .copse/index)
-cps status | has "M h" && [[ "$(ls -l .copse/index)" == "$before" && -e .copse/operation.lock ]] && ok "status still works while another command is busy, and leaves the index alone" || fail "line $LINENO: a step before this check failed"
-kill $holder; wait $holder 2>/dev/null || true; rm -f .copse/operation.lock
+# Another command holding the lock (as copse holds it: an OS lock on the file).
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); f.seek(0); f.truncate(); f.write("4242 merge\n"); f.flush(); open(sys.argv[2], "w").close(); time.sleep(30)' .copse/operation.lock ../holding & holder=$!
+for _ in $(seq 1 100); do [[ -e ../holding ]] && break; perl -e 'select(undef,undef,undef,0.05)'; done
+echo h2 > h; touch -t 202001010000 h; before=$(ls -l .copse/index)
+cps status | has "M h" && [[ "$(ls -l .copse/index)" == "$before" ]] && ok "status still works while another command is busy, and leaves the index alone" || fail "line $LINENO: a step before this check failed"
+kill $holder; wait $holder 2>/dev/null || true; rm -f ../holding
 cd ..
 
 echo "== edits that keep a file's size and modification time"

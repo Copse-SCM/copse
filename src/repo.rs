@@ -309,54 +309,31 @@ impl Repo {
     /// Hold this working directory's operation lock until the result is dropped.
     /// Every command that changes HEAD, branches, the index or your files takes it
     /// (see `main`), so a second one running at the same time can't build on what
-    /// the first is about to replace. A lock whose process has gone is taken over.
+    /// the first is about to replace.
+    ///
+    /// It's an OS file lock (`flock`) on `operation.lock`, which the system
+    /// releases however the command ends (an error, a crash, a kill), so a lock is
+    /// never left behind and never has to be taken over. The file stays; what's in
+    /// it ("PID command") only names the holder, for messages.
     ///
     /// Commands the holder runs (hooks, `rebase -x`, `bisect run` scripts) inherit
-    /// `COPSE_OPERATION_LOCK`, naming the lock's owner; a copse they start shares
-    /// the lock instead of waiting for it, since its parent is waiting for it.
+    /// `COPSE_OPERATION_LOCK`, naming the holder; a copse they start shares the lock
+    /// instead of waiting for it, since its parent is waiting for it.
     pub fn lock_operation(&self, what: &str) -> Result<OpLock> {
-        let path = self.wt.join("operation.lock");
-        if self.lock_is_ours(&path) {
-            return Ok(OpLock { path: None });
-        }
         // Another commit usually holds it for milliseconds, so wait a little for
         // our turn (git fails at once; scripts running commands side by side
         // shouldn't have to retry).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut f) => {
-                    f.write_all(format!("{} {what}\n", std::process::id()).as_bytes())?;
-                    std::env::set_var(LOCK_OWNER, std::process::id().to_string());
-                    return Ok(OpLock { path: Some(path) });
-                }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            match self.try_lock(what)? {
+                Some(lock) => return Ok(lock),
+                None if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                None => {
+                    let path = self.wt.join("operation.lock");
                     let text = fs::read_to_string(&path).unwrap_or_default();
                     let (pid, other) = text.trim().split_once(' ').unwrap_or((text.trim(), "another command"));
-                    match pid.parse::<i32>() {
-                        Ok(pid) if pid > 0 && !process_alive(pid) => {
-                            // Left by a command that's gone. Renamed aside first, so of
-                            // two commands finding it, only one removes it.
-                            let aside = self.wt.join(format!("operation.lock.{}", std::process::id()));
-                            if fs::rename(&path, &aside).is_ok() {
-                                if fs::read_to_string(&aside).unwrap_or_default() == text {
-                                    let _ = fs::remove_file(&aside);
-                                } else {
-                                    // Someone else's fresh lock: put it back.
-                                    let _ = fs::rename(&aside, &path);
-                                }
-                            } else if std::time::Instant::now() >= deadline {
-                                bail!("couldn't take over {}, left by a command that's gone; delete it", path.display());
-                            }
-                        }
-                        _ if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
-                        _ => bail!(
-                            "another copse command ({other}, process {pid}) is changing this working directory; wait for it to finish (if none is running, delete {})",
-                            path.display()
-                        ),
-                    }
+                    bail!("another copse command ({other}, process {pid}) is changing this working directory; wait for it to finish");
                 }
-                Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
             }
         }
     }
@@ -365,20 +342,25 @@ impl Repo {
     /// commands that only tidy up (status refreshing its stat cache), which would
     /// rather skip that than wait or fail.
     pub fn try_lock_operation(&self, what: &str) -> Option<OpLock> {
-        let path = self.wt.join("operation.lock");
-        if self.lock_is_ours(&path) {
-            return Some(OpLock { path: None });
-        }
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&path).ok()?;
-        f.write_all(format!("{} {what}\n", std::process::id()).as_bytes()).ok()?;
-        Some(OpLock { path: Some(path) })
+        self.try_lock(what).ok().flatten()
     }
 
-    /// Is the lock held by this process, or by the copse that started it?
-    fn lock_is_ours(&self, path: &Path) -> bool {
-        let Ok(owner) = std::env::var(LOCK_OWNER) else { return false };
-        let text = fs::read_to_string(path).unwrap_or_default();
-        text.split_whitespace().next() == Some(owner.as_str())
+    fn try_lock(&self, what: &str) -> Result<Option<OpLock>> {
+        use std::os::unix::io::AsRawFd;
+        let path = self.wt.join("operation.lock");
+        let mut file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).with_context(|| format!("opening {}", path.display()))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            let me = std::process::id();
+            file.set_len(0)?;
+            file.write_all(format!("{me} {what}\n").as_bytes())?;
+            std::env::set_var(LOCK_OWNER, me.to_string());
+            return Ok(Some(OpLock { file: Some(file) }));
+        }
+        // Held. By the copse that started us (it's waiting on us), or by ourselves
+        // earlier in this process: share it.
+        let holder = fs::read_to_string(&path).unwrap_or_default();
+        let ours = std::env::var(LOCK_OWNER).is_ok_and(|owner| holder.split_whitespace().next() == Some(owner.as_str()));
+        Ok(ours.then_some(OpLock { file: None }))
     }
 
     /// Resolve `HEAD`, a branch name, or a commit id prefix, optionally followed by `~N`.
@@ -547,10 +529,15 @@ impl Repo {
         validate_branch(name).with_context(|| format!("invalid tag name {name:?}"))?;
         let path = self.dir.join("tags").join(ref_file(name));
         let lock = PathBuf::from(format!("{}.lock", path.display()));
-        match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => bail!("tag {name} is being updated by someone else; try again"),
-            Err(e) => return Err(e.into()),
+        let mut attempt = 0;
+        loop {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+                Ok(_) => break,
+                // One left by an interrupted operation is cleared, as for other refs.
+                Err(e) if e.kind() == ErrorKind::AlreadyExists && attempt == 0 && clear_stale_lock(&lock) => attempt += 1,
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => bail!("tag {name} is being updated by someone else; try again"),
+                Err(e) => return Err(e.into()),
+            }
         }
         let result = (|| {
             if self.tag(name)? != Some(*old) {
@@ -679,10 +666,15 @@ impl Repo {
         validate_branch(name)?;
         let path = self.dir.join("refs").join(ref_file(name));
         let lock = PathBuf::from(format!("{}.lock", path.display()));
-        match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => bail!("{name} is being updated by someone else; try again"),
-            Err(e) => return Err(e.into()),
+        let mut attempt = 0;
+        loop {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+                Ok(_) => break,
+                // One left by an interrupted operation is cleared, as for other refs.
+                Err(e) if e.kind() == ErrorKind::AlreadyExists && attempt == 0 && clear_stale_lock(&lock) => attempt += 1,
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => bail!("{name} is being updated by someone else; try again"),
+                Err(e) => return Err(e.into()),
+            }
         }
         let result = (|| {
             if self.branch(name)? != Some(*old) {
@@ -779,7 +771,9 @@ pub fn validate_remote(name: &str) -> Result<()> {
 /// folders, no empty folders left behind, no file-versus-folder clashes.
 /// A working directory's operation lock (`Repo::lock_operation`), released when dropped.
 pub struct OpLock {
-    path: Option<PathBuf>, // None: shared with whoever already held it
+    /// The locked file (closing it releases the lock); None when shared with
+    /// whoever already held it.
+    file: Option<fs::File>,
 }
 
 /// Names the process holding the operation lock, for the commands it runs.
@@ -787,16 +781,10 @@ const LOCK_OWNER: &str = "COPSE_OPERATION_LOCK";
 
 impl Drop for OpLock {
     fn drop(&mut self) {
-        if let Some(path) = &self.path {
-            let _ = fs::remove_file(path);
+        if let Some(file) = &self.file {
+            let _ = file.set_len(0); // no longer anyone's
         }
     }
-}
-
-fn process_alive(pid: i32) -> bool {
-    // Signal 0 checks without sending anything; EPERM means it exists but isn't ours.
-    let sent = unsafe { libc::kill(pid, 0) } == 0;
-    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 pub fn ref_file(name: &str) -> String {

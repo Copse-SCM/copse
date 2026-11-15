@@ -100,6 +100,11 @@ cd ../laptop && cps pull >/dev/null && [[ -f s.txt ]] && ok "commit pushed over 
 cd .. && : > ssh-args && cps clone "ssh://me@somehost:2222$WORK/drive/proj.copse" viaport >/dev/null && [[ -f viaport/s.txt ]] && same "$(cut -d' ' -f1-3 ssh-args)" "-p 2222 me@somehost" "an ssh:// address with a port connects to that port" || fail "line $LINENO: a step before this check failed"
 printf '#!/bin/sh\necho "ssh was run" >&2; exit 1\n' > no-ssh && chmod +x no-ssh && export COPSE_SSH="$WORK/no-ssh"
 cps clone "file://$WORK/drive/proj.copse" viafile >/dev/null && [[ -f viafile/s.txt ]] && same "$(cd viafile && cps remote | awk '{print $2}')" "$(cd "$WORK/drive/proj.copse" && pwd -P)" "a file:// address is a local folder (never ssh), remembered as its path" || fail "line $LINENO: a step before this check failed"
+export COPSE_SSH="$WORK/fake-ssh" && printf '#!/bin/sh\nsleep 2\nexec "%s" "$@"\n' "$WORK/fake-ssh" > slow-ssh && chmod +x slow-ssh
+(cd viaport && cps branch other >/dev/null) && (cd viassh && echo more > more.txt && cps commit -m more >/dev/null && cps push >/dev/null)
+cd viaport && COPSE_SSH="$WORK/slow-ssh" cps pull > ../pull-out 2>&1 & pid=$!
+sleep 1; (cd viaport && cps checkout other >/dev/null); wait $pid && fail "a pull whose branch was switched during the download should stop" || true
+[[ "$(cat pull-out)" == *"switched branches while pull was downloading"* && ! -e viaport/more.txt ]] && ok "switching branches while pull downloads makes it stop, rather than pull into the other branch" || fail "line $LINENO: $(cat pull-out)"
 cd laptop
 unset COPSE_SSH COPSE_REMOTE_CMD
 
