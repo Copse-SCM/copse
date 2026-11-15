@@ -274,20 +274,28 @@ fn add_verified(w: &mut PackWriter, batch: &mut Vec<(Id, Vec<u8>)>) -> Result<()
 
 pub enum Url {
     Local(PathBuf),
-    Ssh { host: String, path: String },
+    Ssh { host: String, port: Option<String>, path: String },
 }
 
-/// `ssh://host/path`, `user@host:path` (scp style), or a local path.
+/// `ssh://[user@]host[:port]/path`, `user@host:path` (scp style), `file:///path`,
+/// or a local path.
 pub fn parse_url(url: &str) -> Url {
     if let Some(rest) = url.strip_prefix("ssh://") {
-        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h.to_string(), Some(p.to_string())),
+            _ => (authority.to_string(), None),
+        };
         let path = if path.starts_with('~') { path.to_string() } else { format!("/{path}") };
-        return Url::Ssh { host: host.to_string(), path };
+        return Url::Ssh { host, port, path };
+    }
+    if let Some(path) = url.strip_prefix("file://") {
+        return Url::Local(PathBuf::from(path));
     }
     if let Some((host, path)) = url.split_once(':') {
         let looks_local = url.starts_with('/') || url.starts_with('.') || url.starts_with('~') || host.contains('/');
         if !looks_local && !host.is_empty() {
-            return Url::Ssh { host: host.to_string(), path: path.to_string() };
+            return Url::Ssh { host: host.to_string(), port: None, path: path.to_string() };
         }
     }
     let path = match url.strip_prefix("~/") {
@@ -352,7 +360,7 @@ pub struct Conn {
 impl Conn {
     pub fn open(url: &str) -> Result<Conn> {
         let mut cmd = match parse_url(url) {
-            Url::Ssh { host, path } => {
+            Url::Ssh { host, port, path } => {
                 // A "host" starting with - would be read by ssh as an option
                 // (-oProxyCommand=... runs a command): never pass one on.
                 if host.starts_with('-') {
@@ -361,6 +369,9 @@ impl Conn {
                 let ssh = std::env::var("COPSE_SSH").unwrap_or_else(|_| "ssh".into());
                 let copse = std::env::var("COPSE_REMOTE_CMD").unwrap_or_else(|_| "copse".into());
                 let mut c = Command::new(ssh);
+                if let Some(p) = port {
+                    c.arg("-p").arg(p);
+                }
                 c.arg(host).arg(format!("{copse} serve {}", remote_path_arg(&path)));
                 c
             }

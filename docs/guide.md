@@ -305,7 +305,7 @@ Pushing to github.com is in daily use: copse itself is versioned with copse and 
 A remote is another copse repository, reached one of two ways:
 
 - **A folder:** `copse remote add origin /Volumes/Backup/myproject.copse`. It can be on an external drive, a synced folder, or anywhere else on this machine.
-- **Another machine over SSH:** `copse remote add origin me@server:repos/myproject.copse`, or `ssh://server/srv/myproject.copse`. copse must be installed and on the `PATH` on that machine. If it isn't, set `COPSE_REMOTE_CMD` to its full path there. To use a different ssh program, set `COPSE_SSH`.
+- **Another machine over SSH:** `copse remote add origin me@server:repos/myproject.copse`, or `ssh://server/srv/myproject.copse` (`ssh://me@server:2222/srv/myproject.copse` for another port). A `file:///path` address is the same as the plain path. copse must be installed and on the `PATH` on that machine. If it isn't, set `COPSE_REMOTE_CMD` to its full path there. To use a different ssh program, set `COPSE_SSH`.
 
 To share work between your machines, make one bare repository and push to it from everywhere:
 
@@ -593,7 +593,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `plumbing.sh` | 37 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
 | `rebase.sh` | 82 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
-| `remote.sh` | 38 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
+| `remote.sh` | 40 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
 | `safety.sh` | 59 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 27 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |

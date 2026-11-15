@@ -85,16 +85,22 @@ expect_fail "unknown remote name is reported" "no remote called" cps fetch upstr
 expect_fail "clone into non-empty dir is refused" "isn't empty" cps clone ../drive/proj.copse ../laptop
 
 echo "== SSH transport (via a stand-in ssh that runs the command locally)"
-cd .. && cat > fake-ssh <<'EOF'
+cd .. && cat > fake-ssh <<EOF
 #!/bin/sh
+echo "\$*" >> "$WORK/ssh-args"
+[ "\$1" = -p ] && shift 2   # a port
 shift            # drop the host name
-exec sh -c "$1"  # run the remote command, as sshd would
+exec sh -c "\$1"  # run the remote command, as sshd would
 EOF
 chmod +x fake-ssh
 export COPSE_SSH="$WORK/fake-ssh" COPSE_REMOTE_CMD="'$COPSE'"
 cps clone "somehost:$WORK/drive/proj.copse" viassh >/dev/null && ok "clone over ssh-style url" || fail "line $LINENO: a step before this check failed"
 cd viassh && echo s > s.txt && cps commit -m s >/dev/null && cps push >/dev/null && ok "push over ssh-style url" || fail "line $LINENO: a step before this check failed"
 cd ../laptop && cps pull >/dev/null && [[ -f s.txt ]] && ok "commit pushed over ssh is visible to others" || fail "line $LINENO: a step before this check failed"
+cd .. && : > ssh-args && cps clone "ssh://me@somehost:2222$WORK/drive/proj.copse" viaport >/dev/null && [[ -f viaport/s.txt ]] && same "$(cut -d' ' -f1-3 ssh-args)" "-p 2222 me@somehost" "an ssh:// address with a port connects to that port" || fail "line $LINENO: a step before this check failed"
+printf '#!/bin/sh\necho "ssh was run" >&2; exit 1\n' > no-ssh && chmod +x no-ssh && export COPSE_SSH="$WORK/no-ssh"
+cps clone "file://$WORK/drive/proj.copse" viafile >/dev/null && [[ -f viafile/s.txt ]] && same "$(cd viafile && cps remote | awk '{print $2}')" "$(cd "$WORK/drive/proj.copse" && pwd -P)" "a file:// address is a local folder (never ssh), remembered as its path" || fail "line $LINENO: a step before this check failed"
+cd laptop
 unset COPSE_SSH COPSE_REMOTE_CMD
 
 echo "== tampered object is caught by the receiver"
