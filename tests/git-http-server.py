@@ -9,6 +9,13 @@ Sign-in: pushing anywhere, and reading anything under /private/, needs HTTP Basi
 auth as tester / s3cret. Everything else can be read anonymously, like a public
 GitHub repository.
 
+Moved repositories, for sign-in tests (every request is logged, with its port and
+whether it carried a login, to <root>/.requests.log):
+  /moved/<path>       301 to /<path> on the same server, as a renamed GitHub
+                      repository answers; a private one asks for the login first
+  /elsewhere/<path>   302 to /<path> on a second port: another host, as far as
+                      logins go
+
 It's also a Git LFS server (the batch API, "basic" transfers), as GitHub is:
   POST <repo>/info/lfs/objects/batch   uploads need the same sign-in as pushing
   GET/PUT /lfs-store/<oid>             contents (PUT needs the token the batch reply gave)
@@ -45,12 +52,33 @@ def store_path(oid):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def moved(self):
+        """Answer for /moved/ and /elsewhere/ (True if it did), after logging."""
+        with open(os.path.join(ROOT, ".requests.log"), "a") as log:
+            log.write(f"{self.server.server_address[1]} {self.command} {self.path} auth={'yes' if self.headers.get('Authorization') else 'no'}\n")
+        for prefix, base in (("/moved/", ""), ("/elsewhere/", f"http://127.0.0.1:{OTHER_PORT}")):
+            if self.path.startswith(prefix):
+                target = self.path[len(prefix) - 1:]
+                if target.startswith("/private/") and self.headers.get("Authorization") != GOOD:
+                    self.reply(401, b"", extra=[("WWW-Authenticate", 'Basic realm="test"')])
+                    return True
+                self.send_response(301 if prefix == "/moved/" else 302)
+                self.send_header("Location", base + target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+        return False
+
     def do_GET(self):
+        if self.moved():
+            return
         if self.path.startswith("/lfs-store/"):
             return self.lfs_get()
         self.run_backend()
 
     def do_POST(self):
+        if self.moved():
+            return
         if self.path.endswith("/info/lfs/objects/batch"):
             return self.lfs_batch()
         if self.path == "/lfs-verify":
@@ -177,6 +205,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass  # quiet
 
 
+import threading
+other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+OTHER_PORT = other.server_address[1]
+threading.Thread(target=other.serve_forever, daemon=True).start()
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 print(server.server_address[1], flush=True)
 server.serve_forever()

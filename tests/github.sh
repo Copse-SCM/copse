@@ -269,6 +269,15 @@ expect_fail "missing repository is reported clearly" "repository not found" cps 
 port=$(cat web-port.txt)
 cps clone "http://tester:s3cret@127.0.0.1:$port/private/secret.git" inlinecreds >/dev/null 2>&1 && ok "login written into the address works" || fail "line $LINENO: a step before this check failed"
 same "$(cd inlinecreds && cps remote)" "origin  http://tester:***@127.0.0.1:$port/private/secret.git  (git)" "and the password is never displayed"
+mkdir -p inlinecreds/.copse/hooks && printf '#!/bin/sh\necho "$2" > "%s/hook-url"\n' "$WORK" > inlinecreds/.copse/hooks/pre-push && chmod +x inlinecreds/.copse/hooks/pre-push
+(cd inlinecreds && echo h > h.txt && cps commit -m h >/dev/null && cps push >/dev/null 2>&1)
+same "$(cat "$WORK/hook-url")" "http://tester:***@127.0.0.1:$port/private/secret.git" "the pre-push hook gets the address as git shows it, without the password"
+echo "http://tester:s3cret@127.0.0.1:$port" > "$WORK/creds"
+cps clone "$base/moved/private/secret.git" movedclone >/dev/null 2>&1 && grep -q s3cret "$WORK/creds" && ok "a renamed private repository (a redirect) signs in, and the saved login is kept, not erased" || fail "line $LINENO: clone failed or the login was erased: $(cat "$WORK/creds")"
+: > "$WORK/creds" && : > web/.requests.log
+cps clone "http://tester:s3cret@127.0.0.1:$port/elsewhere/proj.git" elsewhere >/dev/null 2>&1 || true
+[[ -s web/.requests.log ]] && ! grep -v "^$port " web/.requests.log | grep -q "auth=yes" && ok "a login written into the address is never sent to the other host a repository moved to" || fail "line $LINENO: $(cat web/.requests.log)"
+out=$(cps clone "http://ghp_SECRETTOKEN@127.0.0.1:$port/proj.git" tokenclone 2>&1) && [[ "$out" != *SECRETTOKEN* && "$(cd tokenclone && cps remote)" != *SECRETTOKEN* ]] && ok "a token written as the user name is never displayed either" || fail "line $LINENO: $out"
 kill $server_pid 2>/dev/null; trap - EXIT
 
 echo "== shallow clones from a git server"

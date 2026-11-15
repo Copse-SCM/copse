@@ -268,7 +268,8 @@ To GitHub, copse looks like any other git client. Commits, authors, emails, time
 - **Asked only when needed.** copse asks for a login only when the server requires one: always for pushing, and for reading private repositories.
 - **Saved and forgotten like git.** Logins that work are saved, and rejected ones are forgotten.
 - **GitHub needs a token.** The password must be a personal access token, not your account password. If you've never signed in with git, create a token on GitHub, then push once with git, or with copse in a terminal where git can ask you for it.
-- **A login written into the address** (`https://user:token@host/…`) also works. copse never prints the password, but it is stored in `.copse/remotes`, so a credential helper is the safer choice.
+- **A login written into the address** (`https://user:token@host/…`) also works, and so does a token alone as the user name (`https://TOKEN@host/…`): as in git, copse asks your credential helpers for that user's password, and signs in with an empty one if they have none. copse never prints the password or token (nor passes it to hooks), but it is stored in `.copse/remotes`, so a credential helper is the safer choice.
+- **Moved repositories.** If a repository was renamed or moved, copse follows the server's redirect and signs in at the new address, without treating the extra sign-in request as a wrong login (a saved login is never erased because of a redirect). A login only goes to the scheme, host and port it was given for: if a repository moves to another host, that host gets its own sign-in.
 
 **How it works:**
 - **Translation.** copse keeps its own fast storage. Objects are translated between git's exact format (SHA-1 ids) and copse's as they cross the wire.
@@ -583,7 +584,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `commit.sh` | 61 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 56 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
-| `github.sh` | 134 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
+| `github.sh` | 138 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
 | `investigate.sh` | 35 | `blame` (every line compared with `git blame`) and `bisect` |

@@ -307,7 +307,10 @@ pub fn push(remote: &str, name: Option<&str>, force: bool, tags: bool, delete: b
                 }
             }
         }
-        crate::hooks::check(&repo, "pre-push", &[remote, &url], Some(&lines), "push")?;
+        // The address as git would show it: without copse's own `git::` marker, and
+        // without any password (a hook's arguments are visible to every process).
+        let shown = crate::githttp::redact(git_url(&url).unwrap_or(&url));
+        crate::hooks::check(&repo, "pre-push", &[remote, &shown], Some(&lines), "push")?;
     }
     if delete {
         let name = name.context("say what to delete: copse push origin --delete BRANCH")?;
