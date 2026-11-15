@@ -71,6 +71,11 @@ echo "== non-bare remote"
 cd .. && cps clone desktop p2 >/dev/null && cd p2 && echo z > z.txt && cps commit -m z >/dev/null
 expect_fail "push to a checked-out branch is refused" "checked out in that repository" cps push origin main
 cps branch side >/dev/null && cps push origin side >/dev/null && ok "push to another branch of a non-bare repo works" || fail "line $LINENO: a step before this check failed"
+(cd ../desktop && cps worktree add ../desktop-side side >/dev/null) && cps checkout side >/dev/null && echo w > w.txt && cps commit -m w >/dev/null
+expect_fail "so is a push to a branch checked out in one of its linked worktrees" "checked out in that repository's working directory at" cps push origin side
+expect_fail "or deleting it" "can't be deleted" cps push origin --delete side
+(cd ../desktop-side && cps status | has "Nothing changed") && ok "and that worktree is left as it was" || fail "line $LINENO: a step before this check failed"
+cps checkout main >/dev/null
 
 echo "== errors"
 cps remote add nowhere ../nope >/dev/null

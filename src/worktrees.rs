@@ -58,6 +58,22 @@ pub fn checked_out_elsewhere(repo: &Repo, branch: &str) -> Result<Option<PathBuf
     Ok(None)
 }
 
+/// The working directory (main or linked) that has `branch` checked out, if any;
+/// a bare repository's HEAD doesn't count, since it has no files to fall behind.
+/// Pushes refuse to move such a branch, as git does: its files and index would
+/// still be the old commit's, and its next commit would quietly undo the push.
+pub fn checked_out_anywhere(repo: &Repo, branch: &str) -> Result<Option<PathBuf>> {
+    for (i, (root, _, head)) in all(repo)?.into_iter().enumerate() {
+        if i == 0 && repo.is_bare() {
+            continue;
+        }
+        if matches!(&head, Some(Head::Branch(b)) if b == branch) {
+            return Ok(Some(root));
+        }
+    }
+    Ok(None)
+}
+
 fn add(repo: &Repo, path: &str, rev: Option<&str>, new_branch: Option<&str>) -> Result<()> {
     let root = std::env::current_dir()?.join(path);
     if root.exists() && fs::read_dir(&root)?.next().is_some() {

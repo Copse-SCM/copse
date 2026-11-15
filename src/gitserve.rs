@@ -483,6 +483,14 @@ fn apply(repo: &Repo, map: &GitMap, old: GitId, new: GitId, refname: &str, allow
         (Some(_), Some(_), true) => true,
         _ => false,
     };
+    // A branch checked out in a working directory (the main one or a linked
+    // worktree) can't be moved under it: its files would still be the old
+    // commit's, and its next commit would quietly undo the push.
+    if !is_tag {
+        if let Some(at) = crate::worktrees::checked_out_anywhere(repo, &name).map_err(|e| (None, format!("{e:#}")))? {
+            return Err((None, format!("branch is checked out in the working directory at {}", at.display())));
+        }
+    }
     let change = RefChange { refname: refname.to_string(), name: name.clone(), is_tag, old: current, new: new_id, forced };
     if let Err(why) = allow(&change) {
         return Err((Some(change), why));
@@ -573,6 +581,38 @@ mod tests {
         }
         assert_eq!(repo.branch("side").unwrap(), None);
         assert_eq!(repo.tag("v1").unwrap(), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn branches_checked_out_in_a_worktree_are_not_moved() {
+        let dir = std::env::temp_dir().join(format!("copse-wt-push-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = Repo::init_bare(&dir).unwrap();
+        let tree = repo.store.put(Kind::Tree, &crate::objects::encode_tree(&[])).unwrap();
+        let one = repo.store.put(Kind::Commit, &crate::objects::Commit::new(tree, vec![], "one".into()).encode()).unwrap();
+        let two = repo.store.put(Kind::Commit, &crate::objects::Commit::new(tree, vec![one], "two".into()).encode()).unwrap();
+        repo.set_branch("main", &one).unwrap();
+        repo.set_branch("feature", &one).unwrap();
+        // A linked worktree with feature checked out.
+        let wt = dir.join("worktrees").join("w1");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("HEAD"), "ref: feature\n").unwrap();
+        std::fs::write(wt.join("path"), "/somewhere/w1\n").unwrap();
+        info_refs(&repo, Service::ReceivePack).unwrap();
+        let mut tr = crate::gitwire::Translator::new(&repo).unwrap();
+        tr.translate_any(two).unwrap();
+        tr.map.save().unwrap();
+        let map = GitMap::load(&repo).unwrap();
+        let (g1, g2) = (map.git(&one).unwrap(), map.git(&two).unwrap());
+        for (old, new) in [(g1, g2), (g1, NO_ID)] {
+            let (reply, _) = receive_pack(&repo, &request(old, new, "refs/heads/feature"), &mut |_| Ok(())).unwrap();
+            assert!(String::from_utf8_lossy(&reply).contains("ng refs/heads/feature branch is checked out"), "{}", String::from_utf8_lossy(&reply));
+        }
+        assert_eq!(repo.branch("feature").unwrap(), Some(one));
+        // The bare repository's own HEAD (main) has no files, so main can move.
+        let (reply, _) = receive_pack(&repo, &request(g1, g2, "refs/heads/main"), &mut |_| Ok(())).unwrap();
+        assert!(String::from_utf8_lossy(&reply).contains("ok refs/heads/main"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -319,7 +319,7 @@ copse pull                                           # get the other machine's w
 **Safety:**
 - **Push won't lose work.** If the remote branch has commits you don't have, push refuses until you `pull`, unless you pass `-f`.
 - **Concurrent pushes can't clobber each other.** The remote updates a branch under a lock, and only if it hasn't moved since you looked.
-- **Checked-out branches are protected.** copse won't push into a branch that a non-bare repository has checked out, because that would change files under someone's feet.
+- **Checked-out branches are protected.** copse won't push into (or delete) a branch that a repository has checked out in any of its working directories, the main one or a linked worktree, because that would change files under someone's feet: that working directory's next commit would quietly undo the push. This holds for copse remotes and for copse serving git over HTTP.
 - **Every transfer is verified.** Each received object is re-hashed before it's kept. Before updating a pushed branch or tag, the receiver checks every object it reaches for missing contents, corruption and incorrect types. Declared shallow boundaries may omit parent history, but still require complete trees and file contents. Submodule commits belong to their own repositories.
 
 **Tags** travel too: `fetch`, `pull` and `clone` bring the remote's tags (yours are never overwritten; a tag that differs is reported and kept as yours), and `copse push origin v1.0` or `copse push --tags` sends them. A tag that already exists on the remote with a different commit is refused unless you pass `--force`.
@@ -591,7 +591,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `plumbing.sh` | 37 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
 | `rebase.sh` | 82 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
-| `remote.sh` | 35 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
+| `remote.sh` | 38 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
 | `safety.sh` | 59 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 24 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
