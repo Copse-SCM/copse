@@ -13,6 +13,7 @@ pub mod gitimport;
 pub mod gitserve;
 pub mod gitview;
 pub mod gitwire;
+pub mod graph;
 pub mod hooks;
 pub mod hunks;
 pub mod identity;

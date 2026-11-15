@@ -68,10 +68,10 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse tag -s <name> -m "..."` / `copse verify-tag <name>` | Make a signed tag (git's format); check a tag's signature |
 | `copse submodule` / `update [--init]` / `add <url> <path>` | Show submodules, check them out at their pinned commits, or add one |
 | `copse commit --amend [-m "msg"] [paths...]` | Replace the last commit with your current files, keeping its author and date (and its message unless you give a new one) |
-| `copse diff [rev [rev]] [--stat] [-- paths]` | Changes: your files against the last commit, against `rev`, or between two revisions (`A B` or `A..B`). `--stat` gives a per-file summary like git's; `-- paths` limits it to some files or folders. |
+| `copse diff [rev [rev]] [--stat] [-- paths]` | Changes: your files against the last commit, against `rev`, or between two revisions (`A B` or `A..B`). `--stat` gives git's per-file summary, laid out exactly as git lays it out (to the terminal's width, or 80 columns into a file or pipe; `Bin 3 -> 8 bytes` for binary files); `-- paths` limits it to some files or folders. |
 | `copse show [rev] [--stat]` | One commit (default: the latest): author, date in the author's timezone, message, and exactly what it changed. Annotated tags show their own message first; merges list their parents. |
 | `copse show REV:path` | A file as it was in that commit (or a folder's listing), as git prints it: `copse show HEAD~2:src/main.rs`, `copse show v1.0:README.md`, `copse show :file` for the current commit's |
-| `copse log [rev...] [options] [-- paths]` | All of history, newest first, merged branches included. `--oneline`, `--graph`, `-p` (changes), `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-n` (or `-5`, as in git), and `-- paths` for commits that touched those paths. `--pretty`/`--format` take git's formats (`oneline`, `short`, `medium`, `full`, `fuller`, `reference`, `raw`) or a template with git's placeholders (`%h %an %ad %s`, `%b`, `%d`, colours...), and `--date` takes `iso`, `iso-strict`, `rfc`, `short`, `raw`, `unix` or `relative`; all checked against git's output. |
+| `copse log [rev...] [options] [-- paths]` | All of history, newest first, merged branches included. `--oneline`, `--graph`, `-p` (changes), `--stat`, `--first-parent`, `--all`, `--author`, `--grep`, `-n` (or `-5`, as in git), and `-- paths` for commits that touched those paths. `--pretty`/`--format` take git's formats (`oneline`, `short`, `medium`, `full`, `fuller`, `reference`, `raw`) or a template with git's placeholders (`%h %an %ad %s`, `%b`, `%d`, colours, the `%+`/`%-`/`% ` modifiers, and column padding such as `%<(20)` or `%<(20,trunc)`), and `--graph` draws branch lines exactly as git does (it's a port of git's own drawing), and `--date` takes `iso`, `iso-strict`, `rfc`, `short`, `raw`, `unix` or `relative`; all checked against git's output. |
 | `copse branch [name [rev]]` | List branches, or create one (at the current commit, or at `rev`) |
 | `copse branch -d <name>` / `-D <name>` | Delete a branch. `-d` refuses if its work isn't merged into your current branch; `-D` deletes anyway. Either way, copse prints the command that brings it back. |
 | `copse branch -m [old] <new>` | Rename a branch (the current one if `old` is left out); `-M` replaces an existing name, unless that branch is checked out (here or in another worktree), as with git |
@@ -545,7 +545,7 @@ Small commands with git's output formats, for scripts and tools. Ids are copse's
 |---|---|
 | `copse rev-parse REV...` | Full ids (`--short` for short ones). `--abbrev-ref HEAD` gives the branch, `--verify -q` checks a name quietly, `--show-toplevel`, `--git-dir`, `--is-inside-work-tree`, `--is-bare-repository` |
 | `copse cat-file -t\|-s\|-p\|-e OBJECT` | An object's type, size or contents; `-e` answers with the exit status. `cat-file blob OBJECT` gives raw contents |
-| `copse ls-tree [-r] [-d] [--name-only] REV [PATH]` | A folder of a commit, one `MODE TYPE ID<tab>NAME` line per entry |
+| `copse ls-tree [-r] [-d] [--name-only] REV [PATH]` | A folder of a commit, one `MODE TYPE ID<tab>NAME` line per entry. As in git, `PATH/` lists a folder's contents, and in a subfolder paths are relative to it (with no PATH, its own contents) |
 | `copse ls-files [-m] [-d] [-o]` | The tracked files, or only modified, deleted or untracked ones |
 | `copse hash-object [-w] [--stdin] FILE...` | The id a file would be stored under; `-w` stores it |
 
@@ -582,15 +582,15 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 |---|---|---|
 | `branches.sh` | 56 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
 | `bridge.sh` | 52 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
-| `commit.sh` | 61 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
+| `commit.sh` | 64 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
 | `config.sh` | 59 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
-| `diff.sh` | 29 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
+| `diff.sh` | 30 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
 | `github.sh` | 138 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
 | `investigate.sh` | 35 | `blame` (every line compared with `git blame`) and `bisect` |
 | `layout.sh` | 64 | Tags between copse repositories, shallow clones, sparse checkout, worktrees |
-| `plumbing.sh` | 37 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
+| `plumbing.sh` | 42 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
 | `rebase.sh` | 82 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 40 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |

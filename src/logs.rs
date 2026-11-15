@@ -98,87 +98,18 @@ fn walk(repo: &Repo, tips: &[Id], first_parent: bool, group_branches: bool) -> R
     Ok(order)
 }
 
-/// ASCII branch lines, one lane per line of history being followed.
-struct Graph {
-    lanes: Vec<Option<Id>>,
+/// The next line of graph drawn beside a commit's text (empty without --graph).
+fn graph_prefix(graph: &mut Option<crate::graph::Graph>) -> String {
+    graph.as_mut().map(|g| g.next_line().0).unwrap_or_default()
 }
 
-impl Graph {
-    fn lane_chars(&self, star: Option<usize>) -> String {
-        let mut out = String::new();
-        for (i, lane) in self.lanes.iter().enumerate() {
-            out.push(if Some(i) == star { '*' } else if lane.is_some() { '|' } else { ' ' });
-            out.push(' ');
+/// What's left of the graph once a commit's text is out (a merge's lines
+/// opening, lines meeting), each on its own line.
+fn graph_rest(graph: &mut Option<crate::graph::Graph>) {
+    if let Some(g) = graph.as_mut() {
+        while !g.is_finished() {
+            println!("{}", g.next_line().0);
         }
-        out
-    }
-
-    /// A line where the given lanes bend diagonally (`\` opening, `/` joining). As in
-    /// git, the diagonal sits between columns: `|\` and `|/`.
-    fn transition(&self, bending: &[usize], diagonal: char) -> String {
-        let mut cells = vec![' '; self.lanes.len() * 2];
-        for (i, lane) in self.lanes.iter().enumerate() {
-            if bending.contains(&i) {
-                cells[(2 * i).saturating_sub(1)] = diagonal;
-            } else if lane.is_some() {
-                cells[2 * i] = '|';
-            }
-        }
-        cells.into_iter().collect()
-    }
-
-    /// Lines drawn before commit `id` (other lines joining it), its own row, and the
-    /// lines drawn after it (a merge opening lines for its other parents).
-    fn rows_for(&mut self, id: &Id, parents: &[Id]) -> (Vec<String>, String, Vec<String>) {
-        let mut before = Vec::new();
-        if let Some(lane) = self.lanes.iter().position(|l| *l == Some(*id)) {
-            let joining: Vec<usize> = (0..self.lanes.len()).filter(|&i| i != lane && self.lanes[i] == Some(*id)).collect();
-            if !joining.is_empty() {
-                before.push(self.transition(&joining, '/'));
-                for i in joining {
-                    self.lanes[i] = None;
-                }
-                while self.lanes.last() == Some(&None) {
-                    self.lanes.pop();
-                }
-            }
-        }
-        let lane = match self.lanes.iter().position(|l| *l == Some(*id)) {
-            Some(i) => i,
-            None => match self.lanes.iter().position(Option::is_none) {
-                Some(free) => {
-                    self.lanes[free] = Some(*id);
-                    free
-                }
-                None => {
-                    self.lanes.push(Some(*id));
-                    self.lanes.len() - 1
-                }
-            },
-        };
-        let row = self.lane_chars(Some(lane));
-        let mut after = Vec::new();
-
-        self.lanes[lane] = parents.first().copied();
-        // A merge opens a lane for each further parent not already being followed.
-        for p in parents.iter().skip(1) {
-            if self.lanes.contains(&Some(*p)) {
-                continue;
-            }
-            let slot = match self.lanes.iter().skip(lane + 1).position(Option::is_none) {
-                Some(off) => lane + 1 + off,
-                None => {
-                    self.lanes.push(None);
-                    self.lanes.len() - 1
-                }
-            };
-            self.lanes[slot] = Some(*p);
-            after.push(self.transition(&[slot], '\\'));
-        }
-        while self.lanes.last() == Some(&None) {
-            self.lanes.pop();
-        }
-        (before, row, after)
     }
 }
 
@@ -227,7 +158,7 @@ pub fn log(args: LogArgs) -> Result<()> {
     let grep = args.grep.map(str::to_lowercase);
     let filtering = !specs.is_empty() || author.is_some() || grep.is_some();
     // Branch lines only make sense when every commit is drawn.
-    let mut graph = (args.graph && !filtering).then(|| Graph { lanes: Vec::new() });
+    let mut graph = (args.graph && !filtering).then(crate::graph::Graph::new);
     if args.graph && filtering {
         println!("{}", paint("2", "(--graph is left out when filtering commits)"));
     }
@@ -272,35 +203,57 @@ pub fn log(args: LogArgs) -> Result<()> {
         let c = c.for_display();
 
         let parents: Vec<Id> = if args.first_parent { c.parents.iter().take(1).copied().collect() } else { c.parents.clone() };
-        let (before, row, after, rail) = match graph.as_mut() {
-            Some(g) => {
-                let (before, row, after) = g.rows_for(&id, &parents);
-                let rail = g.lane_chars(None);
-                (before, row, after, rail)
-            }
-            None => (Vec::new(), String::new(), Vec::new(), String::new()),
+        // As in git: the graph moves on to this commit, then a separator line
+        // (between multi-line entries) is drawn with the graph's padding, then any
+        // lines before the commit's own, and its text starts beside that one.
+        if let Some(g) = graph.as_mut() {
+            g.update(id, &parents);
+        }
+        let multi_line = match &args.format {
+            Some(f @ crate::pretty::Format::Named(_)) => !f.is_one_line(),
+            Some(crate::pretty::Format::Custom { terminator, .. }) => !terminator,
+            None => !args.oneline,
         };
-        for line in before {
-            println!("{}", line.trim_end());
+        if shown > 1 && multi_line && !matches!(&args.format, None) {
+            let pad = graph.as_mut().map(|g| g.padding_line()).unwrap_or_default();
+            println!("{pad}");
+        }
+        let mut row = String::new();
+        if let Some(g) = graph.as_mut() {
+            loop {
+                let (line, is_commit) = g.next_line();
+                if is_commit {
+                    row = line;
+                    break;
+                }
+                println!("{line}");
+            }
         }
         let labels_text = labels.get(&id).map(|n| paint("32", &format!(" ({})", n.join(", ")))).unwrap_or_default();
         let title = c.message.lines().next().unwrap_or_default();
         if let Some(format) = &args.format {
-            // A blank line between multi-line entries; format: (not tformat:) separates with a newline.
             let custom_separator = matches!(format, crate::pretty::Format::Custom { terminator: false, .. });
-            if shown > 1 && (custom_separator || matches!(format, crate::pretty::Format::Named(_)) && !format.is_one_line()) {
-                println!("{}", rail.trim_end());
-            }
             let text = crate::pretty::render(format, &id, &c, &deco, args.date);
-            let text = text.strip_suffix('\n').unwrap_or(&text);
+            // A named format ends with its own newline; a custom one is printed as
+            // it expanded (%B ends with the message's blank line, as in git).
+            let text = if matches!(format, crate::pretty::Format::Named(_)) { text.strip_suffix('\n').unwrap_or(&text) } else { &text };
             let mut lines = text.split('\n');
             let first = lines.next().unwrap_or_default();
             let mut out = format!("{row}{first}");
             for l in lines {
-                out += &format!("\n{rail}{l}");
+                out += &format!("\n{}{l}", graph_prefix(&mut graph));
             }
             if custom_separator {
                 print!("{out}");
+                if graph.as_ref().is_some_and(|g| !g.is_finished()) {
+                    // format: has no newline after an entry; the graph's rest goes
+                    // on lines of its own, the last one left open as the entry was.
+                    let mut rest = Vec::new();
+                    while let Some(g) = graph.as_mut().filter(|g| !g.is_finished()) {
+                        rest.push(g.next_line().0);
+                    }
+                    print!("\n{}", rest.join("\n"));
+                }
             } else {
                 println!("{out}");
             }
@@ -309,13 +262,11 @@ pub fn log(args: LogArgs) -> Result<()> {
         } else {
             println!("{row}{}{labels_text}  {}  {}", paint("33", &short(&id)), format_time(c.time()), c.author.name());
             for line in c.message.lines() {
-                println!("{rail}    {line}");
+                println!("{}    {line}", graph_prefix(&mut graph));
             }
-            println!("{}", rail.trim_end());
+            println!("{}", graph_prefix(&mut graph).trim_end());
         }
-        for line in after {
-            println!("{}", line.trim_end());
-        }
+        graph_rest(&mut graph);
         if args.patch || args.stat {
             if matches!(&args.format, Some(crate::pretty::Format::Custom { terminator: false, .. })) {
                 println!();

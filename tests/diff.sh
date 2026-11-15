@@ -77,6 +77,12 @@ for t in c1 c2 c3; do
   same "$(cps show --stat "$t" | summary)" "$(git -C ../server.git show --stat --format= "$t" | summary)" "show --stat $t: same summary as git"
 done
 same "$(cps diff --stat c1 c3 | stat_shape)" "$(git -C ../server.git diff --stat c1 c3 | stat_shape)" "diff --stat between revisions matches git"
+seq 1 300 > big.txt && printf 'a\0b' > blob.bin && mkdir -p a/very/long/folder/name/that/goes/on/and/on && echo z > a/very/long/folder/name/that/goes/on/and/on/with-a-long-file-name.txt && cps commit -m s1 >/dev/null
+seq 1 300 | sed 's/^/y/' > big.txt && printf 'a\0bcdefg' > blob.bin && echo zz >> a/very/long/folder/name/that/goes/on/and/on/with-a-long-file-name.txt && rm side.txt && cps commit -m s2 >/dev/null && cps push gh >/dev/null
+for cols in 80 40 120; do
+  [[ "$(COLUMNS=$cols cps diff --stat HEAD~1 HEAD)" == "$(COLUMNS=$cols git -C ../server.git diff --stat HEAD~1 HEAD)" ]] || fail "--stat at $cols columns differs from git: $(diff <(COLUMNS=$cols cps diff --stat HEAD~1 HEAD) <(COLUMNS=$cols git -C ../server.git diff --stat HEAD~1 HEAD))"
+done
+ok "--stat is laid out exactly as git's: widths, scaled bars, shortened names, and Bin 3 -> 8 bytes"
 
 echo
 echo "All $pass checks passed."

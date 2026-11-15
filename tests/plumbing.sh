@@ -73,6 +73,15 @@ alike "a path picks one entry" ls-tree HEAD src
 alike "-r with a path lists under it" ls-tree -r HEAD src
 alike "-d lists only folders" ls-tree -d HEAD
 alike "--name-only" ls-tree --name-only -r HEAD
+alike "a trailing / lists a folder's contents" ls-tree HEAD src/
+alike "and works deeper down" ls-tree --name-only HEAD src/deep/
+alike "-d with a folder/ lists the folders in it" ls-tree -d HEAD src/
+alike "a path that matches nothing lists nothing" ls-tree HEAD nope
+for args in "HEAD" "-r --name-only HEAD" "HEAD deep" "HEAD deep/" "HEAD ../run.sh"; do
+  # shellcheck disable=SC2086
+  [[ "$(cd src && cps ls-tree $args | ids)" == "$(cd ../g/src && git ls-tree $args | ids)" ]] || fail "ls-tree $args in a subfolder differs from git: $(cd src && cps ls-tree $args)"
+done
+ok "in a subfolder, paths are relative to it, and with none its own contents are listed"
 
 echo "== ls-files, rev-parse, hash-object"
 alike "ls-files lists the tracked files" ls-files

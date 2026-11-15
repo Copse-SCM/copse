@@ -58,26 +58,6 @@ fn entry_id(mode: Mode, id: &Id) -> String {
     }
 }
 
-/// A tree listing, one entry per line: "MODE TYPE ID\tNAME" (git's format).
-fn tree_lines(store: &Store, tree: &Id, prefix: &str, recursive: bool, dirs_only: bool, name_only: bool, out: &mut Vec<u8>) -> Result<()> {
-    for e in crate::objects::decode_tree(&store.get_kind(tree, Kind::Tree)?)? {
-        let path = format!("{prefix}{}", e.name);
-        if recursive && e.mode == Mode::Dir {
-            tree_lines(store, &e.id, &format!("{path}/"), recursive, dirs_only, name_only, out)?;
-            continue;
-        }
-        if dirs_only && e.mode != Mode::Dir {
-            continue;
-        }
-        if name_only {
-            writeln!(out, "{}", crate::objects::quote_path(&path))?;
-        } else {
-            writeln!(out, "{} {} {}\t{}", git_mode(e.mode), entry_type(e.mode), entry_id(e.mode, &e.id), crate::objects::quote_path(&path))?;
-        }
-    }
-    Ok(())
-}
-
 /// What `cat-file -p` prints for an object.
 fn pretty(repo: &Repo, kind: Kind, data: &[u8]) -> Result<Vec<u8>> {
     Ok(match kind {
@@ -221,7 +201,11 @@ pub fn rev_parse(a: RevParse) -> Result<()> {
     Ok(())
 }
 
-/// `copse ls-tree [-r] [-d] [--name-only] REV [PATH]`
+/// `copse ls-tree [-r] [-d] [--name-only] REV [PATH]`, as git's: PATH is relative
+/// to the folder you're in (with none, that folder's contents are listed), a
+/// trailing `/` means a folder's contents rather than the folder itself, `-r`
+/// lists the files under a folder, `-d` only folders, and paths are shown
+/// relative to where you are. A PATH that matches nothing lists nothing.
 pub fn ls_tree(rev: &str, path: Option<&str>, recursive: bool, dirs_only: bool, name_only: bool) -> Result<()> {
     let repo = Repo::find_any()?;
     let id = repo.resolve_object(rev)?;
@@ -229,22 +213,87 @@ pub fn ls_tree(rev: &str, path: Option<&str>, recursive: bool, dirs_only: bool, 
         Kind::Tree => id,
         _ => repo.read_commit(&repo.peel(id)?)?.tree,
     };
+    let here = here_in(&repo);
+    let given = format!("{here}{}", path.unwrap_or(""));
+    let folder = given.is_empty() || given.ends_with('/');
+    let spec = resolve_dots(&given).with_context(|| format!("{} is outside the repository", path.unwrap_or("")))?;
+    let mut found = Vec::new();
+    walk_tree(&repo.store, &tree, "", &spec, folder, recursive, dirs_only, &mut found)?;
     let mut out = Vec::new();
-    match path.map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()) {
-        None => tree_lines(&repo.store, &tree, "", recursive, dirs_only, name_only, &mut out)?,
-        Some(p) => {
-            let (mode, eid) = crate::objects::entry_at(&repo.store, &tree, p)?.with_context(|| format!("{p} isn't in {rev}"))?;
-            if mode == Mode::Dir && recursive {
-                tree_lines(&repo.store, &eid, &format!("{p}/"), true, dirs_only, name_only, &mut out)?;
-            } else if name_only {
-                writeln!(out, "{}", crate::objects::quote_path(&p))?;
-            } else {
-                writeln!(out, "{} {} {}\t{}", git_mode(mode), entry_type(mode), entry_id(mode, &eid), crate::objects::quote_path(&p))?;
-            }
+    for (p, mode, eid) in found.into_iter().filter(|(_, m, _)| !dirs_only || *m == Mode::Dir) {
+        let rel = relative_to(&p, &here);
+        let shown = if rel.is_empty() { "./".to_string() } else { crate::objects::quote_path(&rel).into_owned() };
+        if name_only {
+            writeln!(out, "{shown}")?;
+        } else {
+            writeln!(out, "{} {} {}\t{shown}", git_mode(mode), entry_type(mode), entry_id(mode, &eid))?;
         }
     }
     std::io::stdout().write_all(&out)?;
     Ok(())
+}
+
+/// The entries `ls-tree` lists for `spec` (a path from the top, no trailing
+/// slash; "" for the top), going into folders only as far as needed.
+#[allow(clippy::too_many_arguments)]
+fn walk_tree(store: &Store, tree: &Id, dir: &str, spec: &str, folder: bool, recursive: bool, dirs: bool, out: &mut Vec<(String, Mode, Id)>) -> Result<()> {
+    for e in crate::objects::decode_tree(&store.get_kind(tree, Kind::Tree)?)? {
+        let path = format!("{dir}{}", e.name);
+        let inside = spec.is_empty() || path.starts_with(&format!("{spec}/"));
+        let is_dir = e.mode == Mode::Dir;
+        let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
+        let listed = if recursive {
+            (inside && !is_dir) || (path == spec && !is_dir)
+        } else if folder {
+            parent == spec
+        } else {
+            path == spec
+        };
+        // -d with -r lists the folders all the way down (git's -d implies -t).
+        let listed = listed || (recursive && dirs && is_dir && (inside || path == spec));
+        if listed {
+            out.push((path.clone(), e.mode, e.id));
+        }
+        let on_the_way = spec.starts_with(&format!("{path}/"));
+        if is_dir && (on_the_way || (path == spec && (folder || recursive)) || (recursive && inside)) {
+            walk_tree(store, &e.id, &format!("{path}/"), spec, folder, recursive, dirs, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Where you are in the project, as a path prefix ("" at the top, "src/" in src).
+fn here_in(repo: &Repo) -> String {
+    let (Ok(cwd), Ok(root)) = (std::env::current_dir().and_then(|d| d.canonicalize()), repo.root.canonicalize()) else { return String::new() };
+    match cwd.strip_prefix(&root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => format!("{}/", crate::objects::path_from_disk(rel)),
+        _ => String::new(),
+    }
+}
+
+/// `a/./b/../c` -> `a/c` (trailing slash dropped); None if it climbs above the top.
+fn resolve_dots(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            p => parts.push(p),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// `path` (from the top) as seen from the folder `here` ("src/"): `src/a` -> `a`, `m` -> `../m`.
+fn relative_to(path: &str, here: &str) -> String {
+    let from: Vec<&str> = here.split('/').filter(|p| !p.is_empty()).collect();
+    let to: Vec<&str> = path.split('/').collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<&str> = vec![".."; from.len() - common];
+    parts.extend(&to[common..]);
+    parts.join("/")
 }
 
 /// `copse ls-files [-m] [-d] [-o]`: the files in the last commit (copse has no

@@ -148,6 +148,22 @@ echo "== --graph matches git's drawing"
 cd .. && git init -q --bare -b main graph.git && cd hist && cps remote add gh ../graph.git >/dev/null && cps push gh >/dev/null
 shape() { sed -E 's/[0-9a-f]{10} //; s/\([^)]*\) //; s/ +/ /g; s/ +$//'; }
 same "$(cps log --oneline --graph main | shape)" "$(git -C ../graph.git log --graph --format=%s main | shape)" "same lines and order as git log --graph"
+# Merges, an octopus and a criss-cross, made with git (one minute apart, so the
+# order is git's too), drawn character for character as git draws them.
+rm -rf ../gr ../gr-c && git init -q -b main ../gr && (
+  cd ../gr && t=1700000000
+  c() { t=$((t + 60)); echo "$1" > "$1"; git add -A; GIT_AUTHOR_DATE="$t +0000" GIT_COMMITTER_DATE="$t +0000" git commit -qm "$1"; }
+  m() { t=$((t + 60)); GIT_AUTHOR_DATE="$t +0000" GIT_COMMITTER_DATE="$t +0000" git merge -q --no-edit -m "$@" >/dev/null; }
+  c base; git branch x; git branch y; git branch z
+  c m1; git checkout -q x; c x1; git checkout -q main; m M2 x
+  git checkout -q y; c y1; c y2; git checkout -q z; c z1; git checkout -q main; c m3; m Oct y z
+  git checkout -q x; c x2; m Xmerge main; git checkout -q main; c m4; m Cross x~1; m Last x; git checkout -q main
+)
+cps clone ../gr ../gr-c >/dev/null 2>&1
+for f in %s '%s%n%an'; do
+  [[ "$(cd ../gr-c && cps log --graph --format="$f" main origin/x origin/y origin/z)" == "$(git -C ../gr log --graph --format="$f" main x y z)" ]] || fail "--graph --format=$f differs from git: $(diff <(cd ../gr-c && cps log --graph --format="$f" main origin/x origin/y origin/z) <(git -C ../gr log --graph --format="$f" main x y z))"
+done
+ok "merges, an octopus merge and a criss-cross draw exactly as in git (padding and trailing spaces too)"
 git -C ../graph.git log --format=%s --topo-order -- f > /dev/null
 same "$(titles -- f | tr ',' '\n' | sort)" "$(git -C ../graph.git log --format=%s -- f | sort)" "-- PATH picks the same commits as git"
 
@@ -171,6 +187,9 @@ done
 ok "--pretty oneline, short, medium, full, fuller, reference and raw print what git prints"
 F='%an|%ae|%al|%ad|%aD|%at|%ai|%aI|%as|%cn|%ce|%cl|%cd|%cD|%ct|%ci|%cI|%cs|%s|%f|[%b]|[%B]|%%|%x41|%p|%P'
 same "$(cps log --format="$F" | ids)" "$(git -C ../g log --format="$F" | ids)" "--format placeholders: names, emails, every date form, subject, body, parents (same as git)"
+same "$(cps log --format=%B | od -c)" "$(git -C ../g log --format=%B | od -c)" "%B keeps the blank line after each message, as git does"
+F2='[%+b][%-b][% s][%+s]%n%<(12)%an|%>(12)%an|%><(12)%an|%<(8,trunc)%s|%<(8,ltrunc)%s|%<(8,mtrunc)%s|%<|(40)%an|'
+same "$(cps log --format="$F2" | od -c)" "$(git -C ../g log --format="$F2" | od -c)" "%+ %- and % modifiers, and padding, truncating and column placeholders (same as git)"
 for d in iso iso-strict rfc short raw unix default; do
   [[ "$(cps log --date=$d --format='%ad %cd')" == "$(git -C ../g log --date=$d --format='%ad %cd')" ]] || fail "--date=$d differs from git"
 done

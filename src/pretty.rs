@@ -298,6 +298,7 @@ fn color_code(name: &str) -> Option<&'static str> {
 /// Expand a template's placeholders for one commit.
 pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: DateMode) -> String {
     let mut out = String::new();
+    let mut pending_pad: Option<Pad> = None;
     let chars: Vec<char> = template.chars().collect();
     let color = colors_on();
     let mut i = 0;
@@ -323,9 +324,26 @@ pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: Da
             i += 1;
             continue;
         }
-        let next = chars[i + 1];
+        // git's modifiers: %+x puts a line break before x when x isn't empty,
+        // % x a space, and %-x removes the line breaks before it when x is empty.
+        let modifier = match chars[i + 1] {
+            m @ ('+' | '-' | ' ') if i + 2 < chars.len() => Some(m),
+            _ => None,
+        };
+        let at = i + usize::from(modifier.is_some());
+        let next = chars[at + 1];
         let mut used = 2;
         let piece: Option<String> = match next {
+            // %<(N), %>(N), %><(N), %<|(N), with ,trunc / ,ltrunc / ,mtrunc: the
+            // next placeholder's width (git's column alignment).
+            '<' | '>' if modifier.is_none() => match parse_pad(&chars[at + 1..], out.rsplit('\n').next().map_or(0, |l| l.chars().count())) {
+                Some((pad, len)) => {
+                    pending_pad = Some(pad);
+                    used = 1 + len;
+                    Some(String::new())
+                }
+                None => None,
+            },
             '%' => Some("%".into()),
             'n' => Some("\n".into()),
             'H' => Some(id.to_hex().to_string()),
@@ -347,15 +365,15 @@ pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: Da
             'a' | 'c' => {
                 used = 3;
                 let sig = if next == 'a' { &c.author } else { &c.committer };
-                chars.get(i + 2).and_then(|f| sig_field(sig, *f))
+                chars.get(at + 2).and_then(|f| sig_field(sig, *f))
             }
             'x' => {
                 used = 4;
-                chars.get(i + 2..i + 4).and_then(|h| u8::from_str_radix(&h.iter().collect::<String>(), 16).ok()).map(|b| (b as char).to_string())
+                chars.get(at + 2..at + 4).and_then(|h| u8::from_str_radix(&h.iter().collect::<String>(), 16).ok()).map(|b| (b as char).to_string())
             }
             'C' => {
                 // %Cred, %Cgreen, %Cblue, %Creset, %C(name) / %C(auto,name) / %C(bold red)
-                let rest: String = chars[i + 2..].iter().collect();
+                let rest: String = chars[at + 2..].iter().collect();
                 let (spec, len) = if rest.starts_with('(') {
                     match rest.find(')') {
                         Some(end) => (rest[1..end].to_string(), end + 1),
@@ -375,10 +393,25 @@ pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: Da
             }
             _ => None,
         };
+        let is_pad = matches!(next, '<' | '>') && modifier.is_none();
         match piece {
             Some(p) => {
+                let p = match if is_pad { None } else { pending_pad.take() } {
+                    Some(pad) => pad.apply(&p),
+                    None => p,
+                };
+                match modifier {
+                    Some('+') if !p.is_empty() => out.push('\n'),
+                    Some(' ') if !p.is_empty() => out.push(' '),
+                    Some('-') if p.is_empty() => {
+                        while out.ends_with('\n') {
+                            out.pop();
+                        }
+                    }
+                    _ => {}
+                }
                 out.push_str(&p);
-                i += used;
+                i = at + used;
             }
             None => {
                 // Not a placeholder copse knows: written as it is, as git does.
@@ -388,6 +421,72 @@ pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: Da
         }
     }
     out
+}
+
+/// A width for the next placeholder, from %<(N), %>(N), %><(N) or %<|(N).
+struct Pad {
+    width: usize,
+    align: char, // '<' left, '>' right, 'c' centred
+    trunc: Option<&'static str>,
+}
+
+impl Pad {
+    fn apply(&self, text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+        if n > self.width {
+            let keep = self.width.saturating_sub(2);
+            return match self.trunc {
+                Some("trunc") => format!("{}..", chars[..keep].iter().collect::<String>()),
+                Some("ltrunc") => format!("..{}", chars[n - keep..].iter().collect::<String>()),
+                Some("mtrunc") => {
+                    let head = keep / 2;
+                    format!("{}..{}", chars[..head].iter().collect::<String>(), chars[n - (keep - head)..].iter().collect::<String>())
+                }
+                _ => text.to_string(),
+            };
+        }
+        let room = self.width - n;
+        match self.align {
+            '>' => format!("{}{text}", " ".repeat(room)),
+            'c' => format!("{}{text}{}", " ".repeat(room / 2), " ".repeat(room - room / 2)),
+            _ => format!("{text}{}", " ".repeat(room)),
+        }
+    }
+}
+
+/// `<(N[,how])`, `>(N)`, `>>(N)`, `><(N)` or `<|(N)` at the start of `rest`, with
+/// `column` the current line's length (for `|`, which pads up to column N).
+/// Returns the padding and how many characters it took.
+fn parse_pad(rest: &[char], column: usize) -> Option<(Pad, usize)> {
+    let text: String = rest.iter().collect();
+    let (align, absolute, skip) = if text.starts_with("><(") {
+        ('c', false, 2)
+    } else if text.starts_with(">>(") {
+        ('>', false, 2)
+    } else if text.starts_with("<|(") {
+        ('<', true, 2)
+    } else if text.starts_with(">|(") {
+        ('>', true, 2)
+    } else if text.starts_with("<(") {
+        ('<', false, 1)
+    } else if text.starts_with(">(") {
+        ('>', false, 1)
+    } else {
+        return None;
+    };
+    let close = text.find(')')?;
+    let inner = &text[skip + 1..close];
+    let (num, how) = inner.split_once(',').map_or((inner, None), |(n, h)| (n, Some(h.trim())));
+    let width: usize = num.trim().parse().ok()?;
+    let width = if absolute { width.saturating_sub(column) } else { width };
+    let trunc = match how {
+        Some("trunc") => Some("trunc"),
+        Some("ltrunc") => Some("ltrunc"),
+        Some("mtrunc") => Some("mtrunc"),
+        _ => None,
+    };
+    Some((Pad { width, align, trunc }, text[..=close].chars().count()))
 }
 
 /// One commit, formatted, with a trailing newline where the format has one.

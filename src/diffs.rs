@@ -106,7 +106,7 @@ fn print_diff(repo: &Repo, old: &Side, new: &Side, specs: &[String], stat: bool)
             None => Vec::new(),
         };
         if stat {
-            stats.push((ch.path.clone(), line_counts(&a, &b)));
+            stats.push((ch.path.clone(), line_counts(&a, &b).ok_or((a.len(), b.len()))));
         } else {
             print_file(ch, &a, &b);
         }
@@ -166,30 +166,96 @@ fn print_file(ch: &FileChange, a: &[u8], b: &[u8]) {
     }
 }
 
-/// git's summary: ` path | 12 +++++++---` per file, then totals.
-fn print_stat(stats: &[(String, Option<(usize, usize)>)]) {
+/// The width `--stat` lays itself out in, as git works it out: $COLUMNS, else the
+/// terminal's width, else (output to a file or a pipe) 80.
+fn stat_width() -> usize {
+    if let Some(n) = std::env::var("COLUMNS").ok().and_then(|c| c.trim().parse::<usize>().ok()).filter(|n| *n > 0) {
+        return n;
+    }
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {
+            return ws.ws_col as usize;
+        }
+    }
+    80
+}
+
+/// git's `scale_linear`: at least one column for any change.
+fn scale(n: usize, width: usize, most: usize) -> usize {
+    if n == 0 { 0 } else { 1 + n * (width - 1) / most }
+}
+
+/// git's summary: ` path | 12 +++++++---` per file (binary files: ` path | Bin
+/// 3 -> 5 bytes`), laid out and scaled exactly as git's `show_stats` does, then
+/// the totals. Counts are (insertions, deletions), or a binary file's sizes.
+fn print_stat(stats: &[(String, Result<(usize, usize), (usize, usize)>)]) {
     if stats.is_empty() {
         return;
     }
-    let stats: Vec<(String, Option<(usize, usize)>)> = stats.iter().map(|(p, c)| (crate::objects::quote_path(p).into_owned(), *c)).collect();
-    let width = stats.iter().map(|(p, _)| p.chars().count()).max().unwrap_or(0);
-    let most = stats.iter().filter_map(|(_, c)| c.map(|(i, d)| i + d)).max().unwrap_or(0);
-    let num_width = most.to_string().len();
-    const BAR: usize = 40;
+    let stats: Vec<(String, Result<(usize, usize), (usize, usize)>)> = stats.iter().map(|(p, c)| (crate::objects::quote_path(p).into_owned(), *c)).collect();
+    let digits = |n: usize| n.to_string().len();
+    let max_len = stats.iter().map(|(p, _)| p.chars().count()).max().unwrap_or(0);
+    let most = stats.iter().filter_map(|(_, c)| c.ok().map(|(i, d)| i + d)).max().unwrap_or(0);
+    let bin_width = stats.iter().filter_map(|(_, c)| c.err().map(|(old, new)| 14 + digits(old) + digits(new))).max().unwrap_or(0);
+    let mut number_width = if bin_width > 0 { 3 } else { 0 };
+    number_width = number_width.max(digits(most));
+    let width = stat_width().max(16 + 6 + number_width);
+    let mut graph_width = if most + 4 > bin_width { most } else { bin_width - 4 };
+    let mut name_width = max_len;
+    if name_width + number_width + 6 + graph_width > width {
+        let three_eighths = (width * 3 / 8).saturating_sub(number_width + 6);
+        if graph_width > three_eighths {
+            graph_width = three_eighths.max(6);
+        }
+        let room = width.saturating_sub(number_width + 6 + graph_width);
+        if name_width > room {
+            name_width = room;
+        } else {
+            graph_width = width - number_width - 6 - name_width;
+        }
+    }
     let (mut total_ins, mut total_del) = (0, 0);
     for (path, counts) in &stats {
+        // A name too long for its column keeps its end, from a `/` where it can.
+        let (prefix, name) = if path.chars().count() > name_width {
+            let keep = name_width.saturating_sub(3);
+            let chars: Vec<char> = path.chars().collect();
+            let tail: String = chars[chars.len() - keep.min(chars.len())..].iter().collect();
+            ("...", tail.find('/').map_or(tail.clone(), |i| tail[i..].to_string()))
+        } else {
+            ("", path.clone())
+        };
+        let pad = name_width.saturating_sub(prefix.len() + name.chars().count());
+        let shown = format!("{prefix}{name}{}", " ".repeat(pad));
         match counts {
-            None => println!(" {path:<width$} | {:>num_width$}", "Bin"),
-            Some((ins, del)) => {
+            Err((old, new)) => {
+                if old == new && *old == 0 {
+                    println!(" {shown} | {:>number_width$}", "Bin");
+                } else {
+                    println!(" {shown} | {:>number_width$} {} -> {} bytes", "Bin", paint("31", &old.to_string()), paint("32", &new.to_string()));
+                }
+            }
+            Ok((ins, del)) => {
                 total_ins += ins;
                 total_del += del;
                 let (mut i, mut d) = (*ins, *del);
-                if most > BAR {
-                    // Scale the bar, but never hide a change completely.
-                    i = if *ins > 0 { (ins * BAR / most).max(1) } else { 0 };
-                    d = if *del > 0 { (del * BAR / most).max(1) } else { 0 };
+                if graph_width <= most {
+                    let mut total = scale(ins + del, graph_width, most);
+                    if total < 2 && *ins > 0 && *del > 0 {
+                        total = 2;
+                    }
+                    if ins < del {
+                        i = scale(*ins, graph_width, most);
+                        d = total - i;
+                    } else {
+                        d = scale(*del, graph_width, most);
+                        i = total - d;
+                    }
                 }
-                println!(" {path:<width$} | {:>num_width$} {}{}", ins + del, paint("32", &"+".repeat(i)), paint("31", &"-".repeat(d)));
+                let space = if ins + del > 0 { " " } else { "" };
+                println!(" {shown} | {:>number_width$}{space}{}{}", ins + del, paint("32", &"+".repeat(i)), paint("31", &"-".repeat(d)));
             }
         }
     }
