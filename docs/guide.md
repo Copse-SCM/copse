@@ -164,7 +164,7 @@ copse records every move of HEAD and of each branch (commits, checkouts, merges,
 
 ## Stashing
 
-`copse stash` puts your uncommitted work aside (edits, new files, deletions, permission changes and symlinks) and resets your files to the last commit. Ignored files are left alone. `copse stash pop` brings the work back as uncommitted changes, exactly as it was.
+`copse stash` puts your uncommitted work aside (edits, new files, deletions, permission changes and symlinks) and resets your files to the last commit. Ignored files are left alone. `copse stash pop` brings the work back as uncommitted changes, exactly as it was. If a stashed file has been renamed since, its changes come back in the renamed file, as with a merge.
 
 - **Several stashes stack up:** 0 is the newest. `copse stash list` shows them with their notes and times.
 - **History can move on in between.** Bringing a stash back uses the same three-way merge as `copse merge`, so it works after you've made new commits or switched to another branch. That's also a handy way to move unfinished work to a different branch.
@@ -596,7 +596,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
 | `safety.sh` | 59 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 24 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
-| `stash.sh` | 32 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
+| `stash.sh` | 36 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |
 | `tui.sh` | 76 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |

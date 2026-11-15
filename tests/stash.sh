@@ -113,5 +113,18 @@ echo precious > precious.txt && cps stash -m precious >/dev/null
 cps gc --prune now >/dev/null && [[ -z "$(find .copse/objects -type f -not -path '*/pack/*')" ]] && ok "everything packed, and unused objects removed" || fail "line $LINENO: a step before this check failed"
 cps stash pop >/dev/null && same "$(cat precious.txt)" "precious" "stash still restores after gc" || fail "line $LINENO: a step before this check failed"
 
+echo "== restore after the file was renamed"
+cd .. && rm -rf renamed && mkdir renamed && cd renamed && cps init >/dev/null && seq 1 20 > a.txt && cps commit -m base >/dev/null
+sed 's/^5$/STASHED/' a.txt > a.tmp && mv a.tmp a.txt && cps stash >/dev/null
+mv a.txt b.txt && cps commit -m rename >/dev/null
+cps stash pop >/dev/null && same "$(grep -c STASHED b.txt) $(cps stash list)" "1 No stashes." "an edit stashed before its file was renamed comes back in the renamed file" || fail "line $LINENO: a step before this check failed"
+cps status | has "M b.txt" && [[ ! -e a.txt ]] && ok "as an uncommitted change to it" || fail "line $LINENO: $(cps status)"
+cps reset --hard >/dev/null && cps stash drop 0 >/dev/null
+seq 1 20 > b.txt && sed 's/^9$/MINE/' b.txt > b.tmp && mv b.tmp b.txt && cps commit -m more >/dev/null
+sed 's/^9$/MINE/; s/^1$/ONE/' b.txt > b.tmp && mv b.tmp b.txt && cps stash >/dev/null && mv b.txt c.txt && cps commit -m rename2 >/dev/null
+echo local > c.txt
+expect_fail "and a local edit to the renamed file isn't overwritten" "also changed" cps stash pop
+same "$(cat c.txt) $(cps stash list | wc -l | tr -d ' ')" "local 1" "the edit and the stash both stay"
+
 echo
 echo "All $pass checks passed."

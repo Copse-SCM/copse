@@ -245,9 +245,14 @@ pub fn apply(n: usize, keep: bool) -> Result<()> {
         None => Default::default(),
     };
     let theirs = flatten(&repo.store, &stash.tree)?;
-    // Your other uncommitted changes can stay, as long as the stash doesn't touch them.
+    let (merged, conflicts) = merge_trees(&repo, &base, &ours, &theirs, "current", &format!("stash {n}"))?;
+    // What bringing the stash back changes: every path where the merge differs
+    // from the last commit. That's the stash's own paths, and also any the merge
+    // moved its changes to (an edit to a.txt lands in b.txt if the file has been
+    // renamed since). Your other uncommitted changes can stay, as long as the
+    // stash doesn't touch them.
     let touched: std::collections::BTreeSet<&String> =
-        base.keys().chain(theirs.keys()).filter(|p| base.get(*p) != theirs.get(*p)).collect();
+        merged.keys().chain(ours.keys()).filter(|p| merged.get(*p) != ours.get(*p)).collect();
     let in_the_way: Vec<&String> = ch.added.iter().chain(&ch.modified).chain(&ch.deleted).filter(|p| touched.contains(p)).collect();
     if !in_the_way.is_empty() {
         for p in &in_the_way {
@@ -255,7 +260,6 @@ pub fn apply(n: usize, keep: bool) -> Result<()> {
         }
         bail!("stash {n} changes {} file(s) you've also changed; commit or stash those first", in_the_way.len());
     }
-    let (merged, conflicts) = merge_trees(&repo, &base, &ours, &theirs, "current", &format!("stash {n}"))?;
 
     // Your files as they are, with the stashed files brought back over them.
     let mut target: crate::merge::Files = files.iter().map(|f| (f.path.clone(), (f.mode, f.id))).collect();
