@@ -174,6 +174,11 @@ mv a/notes.log .. && cps checkout main >/dev/null && [[ $(cat a) == a && $(cat z
 echo mine > x
 out=$(cps checkout third 2>&1) && fail "a checkout that needs a folder where an ignored file is should be refused"
 [[ "$out" == *"x is in the way of x/y"* && $(cat x) == mine ]] && cps status | has "On branch main" && ok "so does an ignored file where a folder has to go" || fail "$out"
+rm x && cps branch secret >/dev/null && cps checkout secret >/dev/null && echo committed > s.env && cps commit -m s >/dev/null && cps checkout main >/dev/null
+echo 's.env' >> .copse/exclude && echo "MY REAL SECRET" > s.env
+out=$(cps checkout secret 2>&1) && fail "a checkout writing over an ignored file should be refused"
+[[ "$out" == *"s.env is in the way"* && $(cat s.env) == "MY REAL SECRET" ]] && cps status | has "On branch main" && ok "so does an ignored file where the branch has a file of its own (never replaced unasked)" || fail "$out"
+rm s.env
 cd ..
 
 echo "== checkout --force keeps a copy of what it discards"

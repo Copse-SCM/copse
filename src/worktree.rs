@@ -465,6 +465,11 @@ fn is_nested_repo(e: &ignore::DirEntry) -> bool {
     e.file_type().is_some_and(|t| t.is_dir()) && (e.path().join(".copse").exists() || e.path().join(".git").exists())
 }
 
+/// Repositories inside this one (submodules or not), whose files are their own.
+pub fn nested_repos(root: &Path, index: &Index) -> Vec<String> {
+    scan(root, index).into_iter().filter(|s| s.mode == Mode::Submodule).map(|s| s.path).collect()
+}
+
 /// Paths of every file copse tracks (everything not ignored, plus whatever `index`
 /// already tracks), sorted.
 pub fn tracked_paths(root: &Path, index: &Index) -> Vec<String> {

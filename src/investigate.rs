@@ -242,6 +242,21 @@ fn require_clean(repo: &Repo, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Uncommitted edits to committed files would be overwritten by the next commit a
+/// bisect checks out, so a step refuses before marking anything. New files are
+/// fine: they stay, and checkout refuses any the next commit has in their place.
+fn require_no_edits(repo: &Repo, what: &str) -> Result<()> {
+    let index = Index::load(&repo.wt)?;
+    let ch = changes(&index, &snapshot(&repo.root, &index, None)?);
+    let edits = ch.modified.len() + ch.deleted.len();
+    if edits > 0 {
+        let only = crate::worktree::Changes { added: vec![], modified: ch.modified, deleted: ch.deleted };
+        print_changes(&only);
+        bail!("{what} would overwrite {edits} uncommitted change(s); commit or stash them first (nothing was marked)");
+    }
+    Ok(())
+}
+
 /// What's left to test, and the next commit to check out (or the answer).
 enum Next {
     Test(Id, usize),
@@ -373,6 +388,7 @@ pub fn bisect(cmd: BisectCmd) -> Result<()> {
             let is_bad = matches!(cmd, BisectCmd::Bad(_));
             let mut b = Bisect::load(&repo)?.context("no bisect is in progress; start one with `copse bisect start BAD GOOD`")?;
             let id = current(rev)?;
+            require_no_edits(&repo, "moving to the next commit to test")?;
             if is_good {
                 b.good.push(id);
             } else if is_bad {
@@ -437,6 +453,7 @@ pub fn bisect(cmd: BisectCmd) -> Result<()> {
                     c => bail!("`{line}` failed with status {c} (128 or more stops the bisect)"),
                 };
                 println!("{} {verdict} (exit {code})", short(&id));
+                require_no_edits(&repo, &format!("`{line}` changed committed files, and moving on"))?;
                 match verdict {
                     "good" => b.good.push(id),
                     "skip" => b.skipped.push(id),

@@ -544,7 +544,7 @@ pub(crate) fn apply_tree(
     // Everything that can fail is done before the first file is touched, so a
     // checkout either happens completely or leaves your files as they were: what's
     // in the way of a write, then downloads.
-    check_way_clear(repo, &to_remove, &to_write)?;
+    check_way_clear(repo, &to_remove, &to_write, &|p| current.contains_key(p))?;
     // LFS contents it'll need, downloaded in one go (the rules come from what's
     // being checked out, since its .gitattributes may not be on disk yet).
     let lfs = crate::lfs::Attrs::for_files(repo, target_files);
@@ -618,10 +618,44 @@ pub(crate) fn apply_tree(
 /// go (`a` when writing `a/b`), or one inside a folder that has to become a file
 /// (`a/notes.log` when writing the file `a`). It isn't removed for you: ignored
 /// files can still be work you want, and copse never throws work away unasked.
-pub(crate) fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_write: &[(&str, Mode, Id)]) -> Result<()> {
+/// `known` says whether copse knows a path (a committed or new file the scan saw),
+/// so writing over it is expected.
+pub(crate) fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_write: &[(&str, Mode, Id)], known: &(dyn Fn(&str) -> bool + Sync)) -> Result<()> {
     let refuse = |blocker: &str, path: &str| -> Result<()> {
         bail!("{blocker} is in the way of {path}, and copse doesn't track it (it may be ignored); move or delete it and try again. Nothing was changed")
     };
+    // A file copse doesn't know (an ignored one: the scan never reports those)
+    // where one is written would be replaced with no copy kept anywhere.
+    let mut unknown: Vec<&str> = to_write
+        .par_iter()
+        .filter(|&&(path, mode, _)| mode != Mode::Submodule && !known(path) && !to_remove.contains(path))
+        .filter(|&&(path, _, _)| fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)).is_ok_and(|m| !m.is_dir()))
+        .map(|&(path, _, _)| path)
+        .collect();
+    if !unknown.is_empty() && ignores_case(&repo.root) {
+        // On a disk that ignores case, `README` may really be the `readme` copse
+        // knows (a rename that only changes case): look up the name it has.
+        unknown.retain(|p| {
+            let full = crate::objects::disk_path(&repo.root, p);
+            let (Some(dir), Some(name)) = (full.parent(), full.file_name()) else { return true };
+            let want = fold_path(&name.to_string_lossy());
+            let Ok(entries) = fs::read_dir(dir) else { return true };
+            !entries.flatten().any(|e| {
+                let on_disk = e.file_name().to_string_lossy().to_string();
+                if fold_path(&on_disk) != want || e.file_name() == name {
+                    return false;
+                }
+                let rel = match p.rsplit_once('/') {
+                    Some((parent, _)) => format!("{parent}/{on_disk}"),
+                    None => on_disk,
+                };
+                known(&rel) || to_remove.contains(&rel)
+            })
+        });
+    }
+    if let Some(path) = unknown.first() {
+        bail!("{path} is in the way: copse doesn't track it (it may be ignored), and a file goes there; move or delete it and try again. Nothing was changed");
+    }
     // The folders files go into, each checked once, outermost first: each must be
     // a real folder, not there yet, or a committed file that's removed first. Below
     // one that isn't a folder now, nothing is there to check.

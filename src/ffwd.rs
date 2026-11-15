@@ -152,7 +152,7 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
     // Untracked or ignored files where a folder has to go, or inside a folder that
     // has to become a file; then downloads. All before the first file is touched,
     // so a fast-forward happens completely or not at all, as checkout does.
-    crate::cmd::check_way_clear(repo, &to_remove, &writes)?;
+    crate::cmd::check_way_clear(repo, &to_remove, &writes, &|p| index.entries.contains_key(p))?;
     if repo.is_partial() {
         let ids: Vec<Id> = writes.iter().filter(|(_, m, _)| *m != Mode::Submodule).map(|(_, _, id)| *id).collect();
         repo.store.prefetch(&ids)?;

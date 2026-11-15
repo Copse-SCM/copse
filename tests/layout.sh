@@ -131,6 +131,9 @@ cd ../feature && cps worktree list | has "← you are here" && cps worktree list
 cd ../src
 cd ../old && cps checkout -f v1.0 >/dev/null 2>&1; cd ../src
 cps gc --prune now >/dev/null && cps fsck | has "everything is intact" && ok "gc keeps every worktree's commits" || fail "line $LINENO: a step before this check failed"
+cd ../feature && mkdir experiment && (cd experiment && cps init >/dev/null && echo work > notes) && cd ../src
+expect_fail "removing a worktree with another repository inside is refused" "repository(s) inside it" cps worktree remove ../feature
+[[ -f ../feature/experiment/notes ]] && ok "and that repository is kept" || fail "line $LINENO: the nested repository was deleted"
 cd ../feature && echo unsaved > unsaved.txt && cd ../src
 expect_fail "removing a worktree with uncommitted changes is refused" "uncommitted change" cps worktree remove ../feature
 cps worktree remove --force ../feature >/dev/null && [[ ! -e ../feature ]] && ok "unless --force" || fail "line $LINENO: a step before this check failed"

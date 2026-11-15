@@ -178,6 +178,15 @@ fn remove(repo: &Repo, path: &str, force: bool) -> Result<()> {
             print_changes(&ch);
             bail!("that worktree has {} uncommitted change(s); commit them, or use --force to throw them away", ch.len());
         }
+        // Another repository inside it has its own history and work, which this
+        // worktree's changes don't show (git refuses these too).
+        let nested = crate::worktree::nested_repos(&other.root, &index);
+        if !nested.is_empty() {
+            for p in &nested {
+                println!("  {p}");
+            }
+            bail!("that worktree has {} repository(s) inside it, with their own files and history; move them out, or use --force to delete them too", nested.len());
+        }
     }
     if root.exists() {
         fs::remove_dir_all(&root).with_context(|| format!("removing {}", root.display()))?;

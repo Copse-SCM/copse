@@ -110,6 +110,10 @@ cps bisect start >/dev/null
 same "$(cps bisect bad | tail -1)" "Waiting for a good commit (copse bisect good REV)." "start with nothing marked waits for marks"
 cps bisect good HEAD~29 | has "left to test" && ok "then marking good begins the search" || fail "line $LINENO: a step before this check failed"
 cps bisect skip | has "left to test" && ok "skip moves on to another commit" || fail "line $LINENO: a step before this check failed"
+echo "debug" >> n.txt && before=$(cat n.txt) && marks=$(cps bisect | sed -n 1p)
+expect_fail "bisect good won't overwrite an uncommitted edit" "commit or stash" cps bisect good
+[[ "$(cat n.txt)" == "$before" && "$(cps bisect | sed -n 1p)" == "$marks" ]] && ok "the edit stays, and nothing was marked" || fail "line $LINENO: n.txt changed or a mark was made"
+cps restore n.txt >/dev/null
 cps bisect reset >/dev/null
 cps checkout keepme~3 >/dev/null 2>&1 && cps bisect start HEAD HEAD~5 >/dev/null && cps bisect reset | has "back on" && cps status | has "HEAD detached at" && ok "starting from a detached HEAD goes back there" || fail "line $LINENO: a step before this check failed"
 cps checkout main >/dev/null
