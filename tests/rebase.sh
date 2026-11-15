@@ -284,5 +284,33 @@ same "$(cat .copse/refs/main) $(cps status | tail -1)" "$before Nothing changed.
 cd ..
 unset COPSE_EDITOR
 
+echo "== errors partway don't lose work or get stuck"
+rm -rf errs && mkdir errs && cd errs && cps init >/dev/null
+printf '1\n2\n3\n' > s.txt && cps commit -m base >/dev/null && cps branch feature >/dev/null
+sed -i.bak 's/^2$/MAIN/' s.txt && rm s.txt.bak && cps commit -m M >/dev/null
+cps checkout feature >/dev/null && sed -i.bak 's/^2$/FEAT/' s.txt && rm s.txt.bak && cps commit -m F >/dev/null && echo extra > e.txt && cps commit -m F2 >/dev/null
+COPSE_EDITOR="sed -i.bak 's/^pick/reword/'" cps rebase -i main >/dev/null 2>&1 || true
+printf '1\nRESOLVED\n3\n' > s.txt
+out=$(COPSE_EDITOR=false cps rebase --continue 2>&1) && fail "a --continue whose editor fails should fail"
+COPSE_EDITOR=true cps rebase --continue >/dev/null 2>&1
+same "$(cps log --format=%s -n 3 | tr '\n' ',') $(cps show HEAD~1:s.txt | tr '\n' ',')" "F2,F,M, 1,RESOLVED,3," "a resolution survives a --continue that failed (the editor here), and the next --continue commits it"
+cd .. && rm -rf errs2 && mkdir errs2 && cd errs2 && cps init >/dev/null && echo a > a && cps commit -m base >/dev/null
+cps branch x >/dev/null && cps branch other >/dev/null && cps checkout x >/dev/null && echo x > x && cps commit -m X >/dev/null
+cps checkout other >/dev/null && echo o > o && cps commit -m O >/dev/null && cps merge x >/dev/null && cps checkout main >/dev/null
+out=$(cps cherry-pick other 2>&1) && fail "cherry-picking a merge without -m should be refused"
+[[ "$out" == *"-m 1"* ]] && cps status | has "Nothing changed" && [[ ! -e .copse/REBASE_STATE ]] && cps cherry-pick -m 1 other >/dev/null && [[ -f x && ! -e o ]] && ok "a merge picked without -m is refused before anything starts, so -m 1 works straight after" || fail "$out"
+cps branch side >/dev/null && cps checkout side >/dev/null && echo y > y && cps commit -m Y >/dev/null && cps checkout main >/dev/null && echo z > z && cps commit -m Z >/dev/null
+printf '#!/bin/sh\ncase "$(cat)" in *Y*) exit 1;; esac\nprintf -- "-----BEGIN PGP SIGNATURE-----\\nAAAA\\n-----END PGP SIGNATURE-----\\n"\n' > ../failsign && chmod +x ../failsign
+cps config gpg.program "$PWD/../failsign" >/dev/null && cps config commit.gpgsign true >/dev/null
+out=$(cps cherry-pick side 2>&1) && fail "a cherry-pick whose signing fails should fail"
+[[ "$out" == *"--skip"* ]] && cps cherry-pick --skip >/dev/null 2>&1 && [[ ! -e .copse/REBASE_STATE && ! -e y ]] && cps status | has "On branch main" && ok "a step that fails (signing here) can be skipped, not only aborted" || fail "$out"
+cps config --unset commit.gpgsign >/dev/null
+cd .. && rm -rf errs3 && mkdir errs3 && cd errs3 && cps init >/dev/null && echo a > a && cps commit -m base >/dev/null && cps branch feature >/dev/null
+echo m > m && cps commit -m M >/dev/null && cps checkout feature >/dev/null && echo f > f && cps commit -m F >/dev/null && orig=$(cps rev-parse feature)
+COPSE_EDITOR="sed -i.bak 's/^pick/edit/'" cps rebase -i main >/dev/null 2>&1
+current=$(sed -n 's/^current //p' .copse/REBASE_STATE) && echo "$current" > .copse/refs/feature   # as if it crashed just after moving the branch
+cps rebase --abort >/dev/null && same "$(cps rev-parse feature) $(cps status | head -1)" "$orig On branch feature" "--abort after a rebase cut short just after moving the branch puts the branch back too"
+cd ..
+
 echo
 echo "All $pass checks passed."

@@ -184,6 +184,7 @@ A stash is stored as an ordinary commit whose parent is the commit you were on. 
   - `copse rebase --skip`: drops that commit and carries on.
   - `copse rebase --abort`: puts the branch and your files back exactly as they were.
 - **Your branch can't be lost mid-rebase.** It doesn't move until the rebase finishes, so an abort or a crash leaves it untouched. While a rebase is paused, `commit`, `merge` and `checkout` refuse to run, so it can't get tangled.
+- **Errors pause, they don't lose work.** If a step fails (an editor or signing program that fails, say), the rebase, cherry-pick or revert pauses before that commit with your files as they were: `--continue` tries it again (a conflict you'd resolved stays resolved), `--skip` leaves it out, `--abort` undoes everything. Picking or reverting a merge commit without `-m` is refused before anything starts. If copse is stopped just as it finishes (after moving the branch), `--abort` moves the branch back too.
 - **Commits that are already in the target** (the same change made there too) are skipped, so no empty commits are left behind.
 - **Merge commits on your branch are flattened.** The commits they brought in are replayed in order, so nothing is dropped. Git does the same by default.
 - **No rebase needed?** If main has nothing new, it says so. If your branch has no commits of its own, it just fast-forwards.
@@ -589,7 +590,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `layout.sh` | 61 | Tags between copse repositories, shallow clones, sparse checkout, worktrees |
 | `plumbing.sh` | 37 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
-| `rebase.sh` | 78 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
+| `rebase.sh` | 82 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 35 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
 | `safety.sh` | 58 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |

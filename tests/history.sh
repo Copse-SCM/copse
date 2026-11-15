@@ -64,7 +64,7 @@ echo "== merges need a parent"
 cps branch side HEAD~1 >/dev/null && cps checkout side >/dev/null && echo s > s.txt && cps commit -m "side: s" >/dev/null && cps checkout topic >/dev/null && cps merge side >/dev/null
 merge_id=$(cps log -n 1 | awk "NR==1" | cut -c1-10)
 cps checkout main >/dev/null
-expect_fail "cherry-picking a merge asks which parent" "--mainline 1" cps cherry-pick "$merge_id"
+expect_fail "cherry-picking a merge asks which parent" "cherry-pick -m 1" cps cherry-pick "$merge_id"
 cps cherry-pick --abort >/dev/null 2>&1 || true
 cps cherry-pick -m 1 "$merge_id" >/dev/null && [[ -f s.txt ]] && ok "-m 1 picks what the merge brought in" || fail "line $LINENO: a step before this check failed"
 

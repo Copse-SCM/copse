@@ -129,6 +129,7 @@ impl Action {
     }
 }
 
+#[derive(Clone)]
 pub struct RebaseState {
     pub op: Op,
     /// For merge commits being picked or reverted: which parent (1-based) to compare with.
@@ -386,6 +387,16 @@ pub fn replay(revs: &[String], op: Op, mainline: usize, cont: bool, skip: bool, 
     if todo.is_empty() {
         println!("Nothing to {}.", op.name());
         return Ok(());
+    }
+    // Checked before anything starts, so a mistake here leaves nothing to clear up.
+    for step in &todo {
+        let parents = repo.read_commit(&step.id)?.parents.len();
+        if parents > 1 && mainline == 0 {
+            bail!("{} is a merge commit; say which parent to compare it with, e.g. `copse {} -m 1 {}`", short(&step.id), op.name(), short(&step.id));
+        }
+        if mainline > 0 && parents > 1 && mainline > parents {
+            bail!("{} has no parent number {mainline}", short(&step.id));
+        }
     }
     repo.set_head(&Head::Detached(orig))?;
     let state = RebaseState {
@@ -740,8 +751,38 @@ fn parse_todo(text: &str, commits: &[Id]) -> Result<Option<Vec<Step>>> {
 // ---------------------------------------------------------------- replaying
 
 /// Run the remaining steps until done, a conflict, or an `edit` pause.
+///
+/// If a step fails (an editor or signing program that fails, a commit that can't
+/// be applied), it goes back to the front of the list and the operation pauses
+/// before it: `--continue` tries it again, `--skip` leaves it out, `--abort`
+/// undoes everything. The resolution or files it had are kept for the retry.
 fn run(repo: &Repo, mut state: RebaseState) -> Result<()> {
-    while !state.todo.is_empty() {
+    while let Some(step) = state.todo.first().cloned() {
+        let done_before = state.done;
+        match run_step(repo, &mut state) {
+            Ok(true) => {}
+            Ok(false) => return Ok(()), // paused: a conflict, an edit, a failed exec
+            Err(e) => {
+                state.todo.insert(0, step.clone());
+                state.done = done_before;
+                state.stopped = None;
+                state.paused_for_edit = false;
+                let _ = state.save(repo);
+                let n = state.op.name();
+                let what = if step.action == Action::Exec { format!("`{}`", step.cmd) } else { short(&step.id) };
+                return Err(e.context(format!(
+                    "the {n} is paused before {what}; fix the problem, then `copse {n} --continue` to try it again, \
+                     `copse {n} --skip` to leave it out, or `copse {n} --abort` to undo everything"
+                )));
+            }
+        }
+    }
+    finish(repo, state)
+}
+
+/// Take the first step off the list and do it. Ok(false): paused, so stop here.
+fn run_step(repo: &Repo, state: &mut RebaseState) -> Result<bool> {
+    {
         let step = state.todo.remove(0);
         let (action, id) = (step.action, step.id);
         if action == Action::Exec {
@@ -770,9 +811,9 @@ fn run(repo: &Repo, mut state: RebaseState) -> Result<()> {
                 println!("`{}` {why}; paused at {}.", step.cmd, short(&state.current));
                 println!("  Fix things, then `copse rebase --continue` (your changes are folded into this commit).");
                 println!("  `copse rebase --abort` undoes the whole rebase.");
-                return Ok(());
+                return Ok(false);
             }
-            continue;
+            return Ok(true);
         }
         let commit = repo.read_commit(&id)?;
         let title = commit.message.lines().next().unwrap_or_default().to_string();
@@ -780,7 +821,7 @@ fn run(repo: &Repo, mut state: RebaseState) -> Result<()> {
             state.done += 1;
             state.save(repo)?;
             println!("  {}/{} dropped {} {title}", state.done, state.total, short(&id));
-            continue;
+            return Ok(true);
         }
         let mut index = Index::load(&repo.wt)?;
         let files = snapshot(&repo.root, &index, None)?;
@@ -797,17 +838,17 @@ fn run(repo: &Repo, mut state: RebaseState) -> Result<()> {
                 repo.set_head(&Head::Detached(id))?;
                 println!("  {}/{} {} {title}", state.done, state.total, paint("33", &short(&id)));
                 if action == Action::Edit {
-                    pause_for_edit(repo, &mut state, id, &title)?;
-                    return Ok(());
+                    pause_for_edit(repo, state, id, &title)?;
+                    return Ok(false);
                 }
                 state.save(repo)?;
-                continue;
+                return Ok(true);
             }
-            finish_step(repo, &mut state, action, &commit, id, commit.tree)?;
+            finish_step(repo, state, action, &commit, id, commit.tree)?;
             if state.paused_for_edit {
-                return Ok(());
+                return Ok(false);
             }
-            continue;
+            return Ok(true);
         }
 
         // A merge commit's changes depend on which parent they're measured against.
@@ -839,7 +880,7 @@ fn run(repo: &Repo, mut state: RebaseState) -> Result<()> {
             state.save(repo)?;
             let why = if action == Action::Revert { "already undone" } else { "its changes are already there" };
             println!("  {}/{} skipped {} {title} ({why})", state.done, state.total, short(&id));
-            continue;
+            return Ok(true);
         }
 
         apply_tree(repo, &mut index, &files, &merged, &[])?;
@@ -857,17 +898,14 @@ fn run(repo: &Repo, mut state: RebaseState) -> Result<()> {
                 println!("  {} {path}  {}", paint("31", "C"), paint("2", reason));
             }
             println!("{}", how_to_go_on(state.op));
-            return Ok(());
+            return Ok(false);
         }
 
         let tree = write_tree(&repo.store, merged.iter().map(|(p, (m, i))| (p.as_str(), *m, *i)))?;
         index.save(&repo.wt)?;
-        finish_step(repo, &mut state, action, &commit, id, tree)?;
-        if state.paused_for_edit {
-            return Ok(());
-        }
+        finish_step(repo, state, action, &commit, id, tree)?;
+        Ok(!state.paused_for_edit)
     }
-    finish(repo, state)
 }
 
 /// Record a replayed step whose resulting tree is `tree` (already in the working
@@ -1009,23 +1047,28 @@ fn continue_rebase(repo: &Repo) -> Result<()> {
     let title = commit.message.lines().next().unwrap_or_default().to_string();
     let mut index = Index::load(&repo.wt)?;
     let files = snapshot(&repo.root, &index, Some(&repo.store))?;
-    state.stopped = None;
-    state.conflicts.clear();
-    state.added.clear();
-    if changes(&index, &files).is_empty() && action != Action::Squash {
-        state.done += 1;
-        println!("  {}/{} skipped {} {title} (nothing left after resolving)", state.done, state.total, short(&stopped));
-        state.save(repo)?;
+    // "Nothing left" is judged against the commit this builds on, not the index:
+    // an earlier --continue that failed partway (an editor or signing program
+    // that failed) mustn't make the resolution look like no change at all.
+    let tree = write_tree(&repo.store, files.iter().map(|f| (f.path.as_str(), f.mode, f.id)))?;
+    let empty = tree == repo.read_commit(&state.current)?.tree;
+    let mut next = RebaseState { stopped: None, conflicts: vec![], added: vec![], ..state.clone() };
+    if empty && action != Action::Squash {
+        next.done += 1;
+        println!("  {}/{} skipped {} {title} (nothing left after resolving)", next.done, next.total, short(&stopped));
+        next.save(repo)?;
     } else {
-        let tree = write_tree(&repo.store, files.iter().map(|f| (f.path.as_str(), f.mode, f.id)))?;
+        // The step is recorded first; only then do the index and the state move
+        // on. If it fails, the operation is still stopped here with your files as
+        // they are, and --continue tries again.
+        finish_step(repo, &mut next, action, &commit, stopped, tree)?;
         index.entries = files.iter().map(|f| (f.path.clone(), f.entry())).collect();
         index.save(&repo.wt)?;
-        finish_step(repo, &mut state, action, &commit, stopped, tree)?;
-        if state.paused_for_edit {
+        if next.paused_for_edit {
             return Ok(());
         }
     }
-    run(repo, state)
+    run(repo, next)
 }
 
 fn skip_commit(repo: &Repo) -> Result<()> {
@@ -1033,7 +1076,20 @@ fn skip_commit(repo: &Repo) -> Result<()> {
     if state.paused_for_edit {
         bail!("the rebase is paused for an edit, not a conflict; run `copse rebase --continue` to carry on");
     }
-    let (_, stopped) = state.stopped.context("the rebase isn't stopped on a commit, so there's nothing to skip")?;
+    // Stopped on a conflict, or paused before a step that failed (see `run`).
+    let stopped = match state.stopped {
+        Some((_, id)) => id,
+        None => {
+            let step = state.todo.first().context("the rebase isn't stopped on a commit, so there's nothing to skip")?;
+            if step.action == Action::Exec {
+                println!("  skipped `{}`", step.cmd);
+                state.todo.remove(0);
+                state.save(repo)?;
+                return run(repo, state);
+            }
+            state.todo.remove(0).id
+        }
+    };
     restore(repo, state.current, &state.added)?;
     state.done += 1;
     state.stopped = None;
@@ -1047,6 +1103,11 @@ fn skip_commit(repo: &Repo) -> Result<()> {
 fn abort_rebase(repo: &Repo) -> Result<()> {
     let state = RebaseState::load(repo)?.context("nothing to abort: no rebase, cherry-pick or revert is in progress")?;
     restore(repo, state.orig, &state.added)?;
+    // The branch only moves when the operation finishes; if that was cut short
+    // (a crash after the move, before the state was cleared), move it back too.
+    if repo.branch(&state.branch)? == Some(state.current) && state.current != state.orig {
+        repo.set_branch(&state.branch, &state.orig)?;
+    }
     repo.set_head(&Head::Branch(state.branch.clone()))?;
     RebaseState::clear(repo)?;
     let n = state.op.name();
