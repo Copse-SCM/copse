@@ -15,6 +15,7 @@ whether it carried a login, to <root>/.requests.log):
                       repository answers; a private one asks for the login first
   /elsewhere/<path>   302 to /<path> on a second port: another host, as far as
                       logins go
+  /away/<path>        302 to a private path on the second port that isn't <path>
 
 It's also a Git LFS server (the batch API, "basic" transfers), as GitHub is:
   POST <repo>/info/lfs/objects/batch   uploads need the same sign-in as pushing
@@ -56,6 +57,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Answer for /moved/ and /elsewhere/ (True if it did), after logging."""
         with open(os.path.join(ROOT, ".requests.log"), "a") as log:
             log.write(f"{self.server.server_address[1]} {self.command} {self.path} auth={'yes' if self.headers.get('Authorization') else 'no'}\n")
+        if self.path.startswith("/away/"):
+            # Another host, and a different path: a login for this server must
+            # never follow it there.
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{OTHER_PORT}/private/somewhere-else")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
         for prefix, base in (("/moved/", ""), ("/elsewhere/", f"http://127.0.0.1:{OTHER_PORT}")):
             if self.path.startswith(prefix):
                 target = self.path[len(prefix) - 1:]

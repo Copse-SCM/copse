@@ -277,6 +277,15 @@ cps clone "$base/moved/private/secret.git" movedclone >/dev/null 2>&1 && grep -q
 : > "$WORK/creds" && : > web/.requests.log
 cps clone "http://tester:s3cret@127.0.0.1:$port/elsewhere/proj.git" elsewhere >/dev/null 2>&1 || true
 [[ -s web/.requests.log ]] && ! grep -v "^$port " web/.requests.log | grep -q "auth=yes" && ok "a login written into the address is never sent to the other host a repository moved to" || fail "line $LINENO: $(cat web/.requests.log)"
+for route in elsewhere/private/secret.git away/proj.git; do
+  for who in "" "tester:s3cret@" "ghp_SECRETTOKEN@"; do
+    echo "http://tester:s3cret@127.0.0.1:$port" > "$WORK/creds" && : > web/.requests.log
+    rm -rf awayclone && cps clone "http://${who}127.0.0.1:$port/$route" awayclone >/dev/null 2>&1 || true
+    ! grep -v "^$port " web/.requests.log | grep -q "auth=yes" || fail "line $LINENO: a login went to the other host ($route, ${who:-saved login}): $(cat web/.requests.log)"
+    grep -q s3cret "$WORK/creds" || fail "line $LINENO: the saved login was erased ($route, ${who:-saved login})"
+  done
+done
+ok "whatever a redirect to another host says (same path or not, a saved login, a password or a token in the address), no login goes there, and the saved one is kept"
 out=$(cps clone "http://ghp_SECRETTOKEN@127.0.0.1:$port/proj.git" tokenclone 2>&1) && [[ "$out" != *SECRETTOKEN* && "$(cd tokenclone && cps remote)" != *SECRETTOKEN* ]] && ok "a token written as the user name is never displayed either" || fail "line $LINENO: $out"
 kill $server_pid 2>/dev/null; trap - EXIT
 

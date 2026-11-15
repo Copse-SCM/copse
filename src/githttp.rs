@@ -89,6 +89,9 @@ pub fn request(agent: &ureq::Agent, method: &str, url: &str, headers: &[(&str, &
 struct Credential {
     username: String,
     password: String,
+    /// The scheme://host:port it belongs to. It's only ever sent there, whatever
+    /// redirects say, and only looked up, saved or forgotten for there.
+    origin: String,
     /// From a credential helper (so it should be approved or rejected afterwards),
     /// rather than written into the address.
     from_helper: bool,
@@ -102,15 +105,18 @@ pub struct Http {
     auth: Option<Credential>,
     /// A user name written into the address without a password
     /// (`https://NAME@host/...`, often a token): sign-in asks the credential
-    /// helpers for that user's password, as git does.
+    /// helpers for that user's password, as git does. Like a login written into
+    /// the address, it belongs to that address's host (`home`) alone.
     url_user: Option<String>,
+    home: String,
 }
 
 impl Http {
     pub fn new(url: &str, service: &'static str) -> Http {
         let agent = new_agent();
         let (base, auth, url_user) = split_userinfo(url.trim_end_matches('/'));
-        Http { base, service, agent, auth, url_user }
+        let home = origin(&base);
+        Http { base, service, agent, auth, url_user, home }
     }
 
     /// The server's branches and capabilities.
@@ -171,7 +177,11 @@ impl Http {
         use rayon::prelude::*;
         let Some((first, rest)) = paths.split_first() else { return Ok(Vec::new()) };
         let mut out = vec![self.get_maybe(first)?];
-        let header = self.auth.as_ref().map(|c| format!("Basic {}", base64(format!("{}:{}", c.username, c.password).as_bytes())));
+        let header = self
+            .auth
+            .as_ref()
+            .filter(|c| c.origin == origin(&self.base))
+            .map(|c| format!("Basic {}", base64(format!("{}:{}", c.username, c.password).as_bytes())));
         let (agent, base) = (self.agent.clone(), self.base.clone());
         let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build()?;
         let fetched: Vec<Result<Option<Vec<u8>>>> = pool.install(|| {
@@ -216,32 +226,46 @@ impl Http {
         }
     }
 
-    /// Use `base` as the repository's address from now on. A login only ever goes
-    /// to the place it was given or saved for: on a move to another scheme, host
-    /// or port it's dropped, and the new place gets its own sign-in if it asks.
+    /// Use `base` as the repository's address from now on (it moved). A login
+    /// stays with the place it belongs to (see `Credential::origin`), so one for
+    /// the old address is simply never sent to a new host.
     fn move_to(&mut self, base: &str) {
-        if origin(base) != origin(&self.base) {
-            self.auth = None;
-        }
         self.base = base.trim_end_matches('/').to_string();
+    }
+
+    /// The address to look a login up under for requests to `here`: the
+    /// repository's own address there, else just that scheme://host:port.
+    fn login_address(&self, here: &str) -> String {
+        if origin(&self.base) == here {
+            self.base.clone()
+        } else {
+            here.to_string()
+        }
     }
 
     /// `send`, but any status other than a sign-in failure comes back as a reply.
     fn send_inner(&mut self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<&[u8]>) -> Result<Reply> {
         let mut url = url.to_string();
         let mut followed = false;
+        let mut asked: HashSet<String> = HashSet::new();
         loop {
             let shown = redact(&self.base);
-            let auth = self.auth.as_ref().map(|c| format!("Basic {}", base64(format!("{}:{}", c.username, c.password).as_bytes())));
+            let here = origin(&url);
+            // A login is sent only to the place it belongs to.
+            let auth = self
+                .auth
+                .as_ref()
+                .filter(|c| c.origin == here)
+                .map(|c| format!("Basic {}", base64(format!("{}:{}", c.username, c.password).as_bytes())));
             let mut all: Vec<(&str, &str)> = headers.to_vec();
             if let Some(a) = &auth {
                 all.push(("Authorization", a));
             }
             let resp = request(&self.agent, method, &url, &all, body)?;
             if resp.status == 401 && resp.url != url && !followed {
-                // Redirected (a renamed or moved repository), and the login, which
-                // isn't carried across redirects, was missing there. Ask the new
-                // address directly; a 401 from it says nothing about the login.
+                // Redirected (a renamed or moved repository), and no login went
+                // along (none is carried across redirects). Ask the new address
+                // directly; a 401 from it says nothing about any login.
                 followed = true;
                 if let Some(base) = url.strip_prefix(&self.base).and_then(|rest| resp.url.strip_suffix(rest)) {
                     let base = base.to_string();
@@ -251,26 +275,29 @@ impl Http {
                 continue;
             }
             if resp.status == 401 {
-                match self.auth.take() {
-                    None => {
-                        self.auth = Some(fill(&self.base, self.url_user.as_deref())?);
-                        continue; // try again, signed in
-                    }
-                    Some(c) => {
-                        if c.from_helper {
-                            let _ = run_helper("reject", &helper_input(&self.base, Some(&c))); // forget what didn't
-                        }
-                        bail!(
-                            "sign-in to {shown} failed (401). For GitHub, the password must be a personal access \
-                             token with access to this repository, not your account password"
-                        );
+                let have_one = self.auth.as_ref().is_some_and(|c| c.origin == here);
+                if !have_one && asked.insert(here.clone()) {
+                    // Sign in for this place: a name from the address only counts
+                    // at the address's own host.
+                    let user = if here == self.home { self.url_user.clone() } else { None };
+                    self.auth = Some(fill(&self.login_address(&here), user.as_deref(), &here)?);
+                    continue; // try again, signed in
+                }
+                if let Some(c) = self.auth.take().filter(|c| c.origin == here) {
+                    if c.from_helper {
+                        let _ = run_helper("reject", &helper_input(&self.login_address(&here), Some(&c))); // forget what didn't
                     }
                 }
+                bail!(
+                    "sign-in to {shown} failed (401). For GitHub, the password must be a personal access \
+                     token with access to this repository, not your account password"
+                );
             }
             if resp.status < 400 {
-                if let Some(c) = self.auth.as_mut() {
+                let address = self.login_address(&here);
+                if let Some(c) = self.auth.as_mut().filter(|c| c.origin == here) {
                     if c.from_helper && !c.approved {
-                        let _ = run_helper("approve", &helper_input(&self.base, Some(c))); // remember what worked
+                        let _ = run_helper("approve", &helper_input(&address, Some(c))); // remember what worked
                         c.approved = true;
                     }
                 }
@@ -318,7 +345,7 @@ fn split_userinfo(url: &str) -> (String, Option<Credential>, Option<String>) {
     let base = format!("{scheme}://{}", &rest[at + 1..]);
     match rest[..at].split_once(':') {
         Some((user, pass)) => {
-            let cred = Credential { username: user.to_string(), password: pass.to_string(), from_helper: false, approved: false };
+            let cred = Credential { username: user.to_string(), password: pass.to_string(), origin: origin(&base), from_helper: false, approved: false };
             (base, Some(cred), None)
         }
         None => (base, None, Some(rest[..at].to_string())),
@@ -337,16 +364,18 @@ fn origin(url: &str) -> String {
     format!("{}://{host}", scheme.to_ascii_lowercase())
 }
 
-/// An address that's safe to print: anything written before the host (a
-/// password, or a token given as the user name) is replaced by ***, keeping a
-/// user name that has a password after it.
+/// An address that's safe to print: a password is replaced by ***, and so is a
+/// web address's user name written alone (often a token). An ssh user name
+/// (`ssh://git@host/...`) is just a name, and is kept, as git shows it.
 pub fn redact(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
     let authority_end = rest.find('/').unwrap_or(rest.len());
+    let web = matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https");
     match rest[..authority_end].rfind('@') {
         Some(at) => match rest[..at].split_once(':') {
             Some((user, _)) => format!("{scheme}://{user}:***@{}", &rest[at + 1..]),
-            None => format!("{scheme}://***@{}", &rest[at + 1..]),
+            None if web => format!("{scheme}://***@{}", &rest[at + 1..]),
+            None => url.to_string(),
         },
         None => url.to_string(),
     }
@@ -386,7 +415,7 @@ fn run_helper(action: &str, input: &str) -> Result<String> {
 /// into the address), the helpers are asked for that user's password; if they
 /// have none, the name is sent with an empty password, which is how a token
 /// given as the user name signs in (as with git).
-fn fill(base: &str, user: Option<&str>) -> Result<Credential> {
+fn fill(base: &str, user: Option<&str>, origin: &str) -> Result<Credential> {
     let shown = redact(base);
     let mut input = helper_input(base, None);
     if let Some(u) = user {
@@ -398,10 +427,11 @@ fn fill(base: &str, user: Option<&str>) -> Result<Credential> {
         (Ok(out), _) if field(out, "username").is_some() && field(out, "password").is_some() => Ok(Credential {
             username: field(out, "username").unwrap(),
             password: field(out, "password").unwrap(),
+            origin: origin.to_string(),
             from_helper: true,
             approved: false,
         }),
-        (_, Some(u)) => Ok(Credential { username: u.to_string(), password: String::new(), from_helper: false, approved: false }),
+        (_, Some(u)) => Ok(Credential { username: u.to_string(), password: String::new(), origin: origin.to_string(), from_helper: false, approved: false }),
         _ => bail!(
             "{shown} needs you to sign in, and no saved login was found. For GitHub, create a personal access \
              token and sign in once with git (or run `git credential approve`); copse uses the same saved login"
@@ -447,6 +477,8 @@ mod tests {
         assert_eq!(cred.map(|c| (c.username, c.password)), Some(("me".into(), "secret".into())));
         // A token written as the user name is a secret too, and is used to sign in.
         assert_eq!(redact("https://ghp_SECRET@github.com/me/r.git"), "https://***@github.com/me/r.git");
+        assert_eq!(redact("ssh://git@example.com/me/r.git"), "ssh://git@example.com/me/r.git");
+        assert_eq!(redact("ssh://git:pw@example.com/me/r.git"), "ssh://git:***@example.com/me/r.git");
         let (base, cred, user) = split_userinfo("https://ghp_SECRET@github.com/me/r.git");
         assert_eq!((base.as_str(), cred.is_none(), user.as_deref()), ("https://github.com/me/r.git", true, Some("ghp_SECRET")));
     }
