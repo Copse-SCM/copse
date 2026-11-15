@@ -151,6 +151,7 @@ same "$(cps log --oneline --graph main | shape)" "$(git -C ../graph.git log --gr
 # Merges, an octopus and a criss-cross, made with git (one minute apart, so the
 # order is git's too), drawn character for character as git draws them.
 rm -rf ../gr ../gr-c && git init -q -b main ../gr && (
+  export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@e
   cd ../gr && t=1700000000
   c() { t=$((t + 60)); echo "$1" > "$1"; git add -A; GIT_AUTHOR_DATE="$t +0000" GIT_COMMITTER_DATE="$t +0000" git commit -qm "$1"; }
   m() { t=$((t + 60)); GIT_AUTHOR_DATE="$t +0000" GIT_COMMITTER_DATE="$t +0000" git merge -q --no-edit -m "$@" >/dev/null; }
