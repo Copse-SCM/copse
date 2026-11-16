@@ -982,7 +982,18 @@ fn replay_commit(repo: &Repo, original: &Commit, tree: Id, parent: Id, message: 
 }
 
 fn finish(repo: &Repo, state: RebaseState) -> Result<()> {
-    repo.set_branch(&state.branch, &state.current)?;
+    // The branch only moves if it's still where this started: a push to it, or a
+    // commit to it from another worktree, while this was paused would otherwise
+    // vanish from it. (Neither should be possible now, but never assume.)
+    let op = state.op.name();
+    let b = &state.branch;
+    let why = format!(
+        "{b} moved while the {op} was going on (to a commit it didn't make), so it was left where it is rather than lose that. \
+         The {op}'s result is checked out at {}: keep it with `copse branch {b}-{op} HEAD` if you want it, \
+         compare with `copse log --graph {b} HEAD`, and `copse {op} --abort` to finish",
+        short(&state.current)
+    );
+    repo.set_branch_from(&state.branch, Some(state.orig), &state.current, &why)?;
     repo.set_head(&Head::Branch(state.branch.clone()))?;
     RebaseState::clear(repo)?;
     let to = paint("33", &short(&state.current));
@@ -1102,16 +1113,23 @@ fn skip_commit(repo: &Repo) -> Result<()> {
 
 fn abort_rebase(repo: &Repo) -> Result<()> {
     let state = RebaseState::load(repo)?.context("nothing to abort: no rebase, cherry-pick or revert is in progress")?;
-    restore(repo, state.orig, &state.added)?;
-    // The branch only moves when the operation finishes; if that was cut short
-    // (a crash after the move, before the state was cleared), move it back too.
-    if repo.branch(&state.branch)? == Some(state.current) && state.current != state.orig {
-        repo.set_branch(&state.branch, &state.orig)?;
-    }
+    // Back to the branch as it is: normally where this started. If finishing was
+    // cut short after moving it (a crash), it's moved back too; if something else
+    // moved it meanwhile, the files follow it there.
+    let tip = repo.branch(&state.branch)?;
+    let back_to = match tip {
+        Some(t) if t == state.current && state.current != state.orig => {
+            repo.set_branch(&state.branch, &state.orig)?;
+            state.orig
+        }
+        Some(t) => t,
+        None => state.orig,
+    };
+    restore(repo, back_to, &state.added)?;
     repo.set_head(&Head::Branch(state.branch.clone()))?;
     RebaseState::clear(repo)?;
     let n = state.op.name();
-    println!("{}{} aborted; {} is back at {}.", n[..1].to_uppercase(), &n[1..], state.branch, short(&state.orig));
+    println!("{}{} aborted; {} is back at {}.", n[..1].to_uppercase(), &n[1..], state.branch, short(&back_to));
     Ok(())
 }
 

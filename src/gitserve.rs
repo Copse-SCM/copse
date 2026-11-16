@@ -487,8 +487,8 @@ fn apply(repo: &Repo, map: &GitMap, old: GitId, new: GitId, refname: &str, allow
     // worktree) can't be moved under it: its files would still be the old
     // commit's, and its next commit would quietly undo the push.
     if !is_tag {
-        if let Some(at) = crate::worktrees::checked_out_anywhere(repo, &name).map_err(|e| (None, format!("{e:#}")))? {
-            return Err((None, format!("branch is checked out in the working directory at {}", at.display())));
+        if let Some((at, why)) = crate::worktrees::checked_out_anywhere(repo, &name).map_err(|e| (None, format!("{e:#}")))? {
+            return Err((None, format!("branch is {why} in the working directory at {}", at.display())));
         }
     }
     let change = RefChange { refname: refname.to_string(), name: name.clone(), is_tag, old: current, new: new_id, forced };

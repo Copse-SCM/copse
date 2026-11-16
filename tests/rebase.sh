@@ -312,5 +312,22 @@ current=$(sed -n 's/^current //p' .copse/REBASE_STATE) && echo "$current" > .cop
 cps rebase --abort >/dev/null && same "$(cps rev-parse feature) $(cps status | head -1)" "$orig On branch feature" "--abort after a rebase cut short just after moving the branch puts the branch back too"
 cd ..
 
+echo "== a branch being rebased is protected everywhere"
+rm -rf prot prot2 prot-wt && mkdir prot && cd prot && cps init >/dev/null && printf '1\n2\n3\n' > s.txt && cps commit -m base >/dev/null && cps branch feature >/dev/null
+sed -i.bak 's/^2$/MAIN/' s.txt && rm s.txt.bak && cps commit -m M >/dev/null && cps checkout feature >/dev/null && sed -i.bak 's/^2$/FEAT/' s.txt && rm s.txt.bak && cps commit -m F >/dev/null
+cps rebase main >/dev/null 2>&1 || true   # stops on the conflict, feature detached
+cd .. && cps clone prot prot2 >/dev/null 2>&1 && cd prot2 && cps checkout feature >/dev/null 2>&1 && echo pushed > p.txt && cps commit -m pushed >/dev/null
+expect_fail "a push to a branch being rebased in that repository is refused" "being rebased in that repository" cps push origin feature
+cd ../prot && cps branch spare >/dev/null && cps worktree add ../prot-wt spare >/dev/null && cd ../prot-wt
+expect_fail "another worktree can't check it out" "is being rebased in the worktree" cps checkout feature
+expect_fail "nor delete it" "being rebased" cps branch -D feature
+expect_fail "nor replace it with -M" "being rebased" cps branch -M spare feature
+cd ../prot && orig=$(cps rev-parse feature) && printf '1\nRESOLVED\n3\n' > s.txt
+other=$(cps rev-parse main) && echo "$other" > .copse/refs/feature   # moved behind its back (an older copse, say)
+out=$(cps rebase --continue 2>&1) && fail "finishing a rebase whose branch moved meanwhile should stop"
+[[ "$out" == *"feature moved while the rebase was going on"* && $(cps rev-parse feature) == "$other" ]] && ok "if the branch moved anyway, finishing leaves it there instead of losing that commit" || fail "$out"
+cps rebase --abort >/dev/null && cps status | has "Nothing changed" && same "$(cps status | head -1)" "On branch feature" "and --abort puts the files where the branch now is" || fail "line $LINENO: $(cps status)"
+cd ..
+
 echo
 echo "All $pass checks passed."

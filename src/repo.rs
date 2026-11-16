@@ -228,6 +228,12 @@ impl Repo {
     /// Point branch `name` at `id`. With `expect`, only if the branch is still at
     /// `expect.0` (checked under the ref's lock, so nothing can move it in between);
     /// otherwise it fails with `expect.1` and the branch is left alone.
+    /// Move branch `name` to `id`, but only if it's still at `old` (checked under
+    /// the ref's lock); otherwise fail with `why`.
+    pub fn set_branch_from(&self, name: &str, old: Option<Id>, id: &Id, why: &str) -> Result<()> {
+        self.move_branch(name, Some((old, why)), id)
+    }
+
     fn move_branch(&self, name: &str, expect: Option<(Option<Id>, &str)>, id: &Id) -> Result<()> {
         validate_branch(name)?;
         let before = self.branch(name)?;

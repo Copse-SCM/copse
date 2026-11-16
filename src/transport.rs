@@ -776,8 +776,8 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
                 bail!("bad delete request");
             };
             validate_branch(branch)?;
-            if let Some(at) = crate::worktrees::checked_out_anywhere(repo, branch)? {
-                bail!("{branch} is checked out in that repository's working directory at {}, so it can't be deleted", at.display());
+            if let Some((at, why)) = crate::worktrees::checked_out_anywhere(repo, branch)? {
+                bail!("{branch} is {why} in that repository's working directory at {}, so it can't be deleted", at.display());
             }
             repo.cas_delete_branch(branch, &parse_hex(old)?)?;
             writeln!(w, "ok")?;
@@ -789,9 +789,9 @@ fn serve_one(repo: &Repo, line: &str, r: &mut impl BufRead, w: &mut impl Write, 
             validate_branch(branch)?;
             let old = if old == "none" { None } else { Some(parse_hex(old)?) };
             let new = parse_hex(new)?;
-            if let Some(at) = crate::worktrees::checked_out_anywhere(repo, branch)? {
+            if let Some((at, why)) = crate::worktrees::checked_out_anywhere(repo, branch)? {
                 bail!(
-                    "{branch} is checked out in that repository's working directory at {}, so it can't be pushed to. \
+                    "{branch} is {why} in that repository's working directory at {}, so it can't be pushed to. \
                      Push to a bare repository (`copse init --bare`), or switch that working directory to another branch.",
                     at.display()
                 );

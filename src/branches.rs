@@ -88,8 +88,8 @@ fn delete(repo: &Repo, name: &str, force: bool) -> Result<()> {
     if current_branch(repo)?.as_deref() == Some(name) {
         bail!("you're on {name}; switch to another branch before deleting it");
     }
-    if let Some(other) = crate::worktrees::checked_out_elsewhere(repo, name)? {
-        bail!("{name} is checked out in the worktree at {}; switch it to another branch first", other.display());
+    if let Some((other, why)) = crate::worktrees::checked_out_elsewhere(repo, name)? {
+        bail!("{name} is {why} in the worktree at {}; finish there, or switch it to another branch, first", other.display());
     }
     not_mid_rebase(repo, name)?;
     if !force {
@@ -124,8 +124,8 @@ fn rename(repo: &Repo, old: &str, new: &str, force: bool) -> Result<()> {
         bail!("branch {new} already exists; use `copse branch -M {old} {new}` to replace it");
     }
     not_mid_rebase(repo, old)?;
-    if let Some(other) = crate::worktrees::checked_out_elsewhere(repo, old)? {
-        bail!("{old} is checked out in the worktree at {}; rename it from there", other.display());
+    if let Some((other, why)) = crate::worktrees::checked_out_elsewhere(repo, old)? {
+        bail!("{old} is {why} in the worktree at {}; rename it from there (once that's finished)", other.display());
     }
     if repo.branch(new)?.is_some() {
         // -M replaces `new`, so it needs the same care as deleting it: a branch
@@ -133,8 +133,8 @@ fn rename(repo: &Repo, old: &str, new: &str, force: bool) -> Result<()> {
         if current_branch(repo)?.as_deref() == Some(new) {
             bail!("you're on {new}, so it can't be replaced; switch to another branch first (or rename {new} out of the way)");
         }
-        if let Some(other) = crate::worktrees::checked_out_elsewhere(repo, new)? {
-            bail!("{new} is checked out in the worktree at {}, so it can't be replaced; switch that worktree to another branch first", other.display());
+        if let Some((other, why)) = crate::worktrees::checked_out_elsewhere(repo, new)? {
+            bail!("{new} is {why} in the worktree at {}, so it can't be replaced; finish there, or switch that worktree to another branch, first", other.display());
         }
         not_mid_rebase(repo, new)?;
         repo.delete_branch(new)?; // -M: the replaced branch's history stays findable

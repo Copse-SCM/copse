@@ -48,11 +48,37 @@ pub fn all(repo: &Repo) -> Result<Vec<(PathBuf, PathBuf, Option<Head>)>> {
     Ok(out)
 }
 
-/// The other working directory that has `branch` checked out, if any.
-pub fn checked_out_elsewhere(repo: &Repo, branch: &str) -> Result<Option<PathBuf>> {
+/// What a working directory is doing with `branch`, if anything: it's checked
+/// out there, or a rebase, cherry-pick or revert there will move it when it
+/// finishes (HEAD is detached meanwhile), or a bisect there will return to it.
+fn use_of(wt: &Path, head: &Option<Head>, branch: &str) -> Option<&'static str> {
+    if matches!(head, Some(Head::Branch(b)) if b == branch) {
+        return Some("checked out");
+    }
+    if let Ok(state) = fs::read_to_string(wt.join("REBASE_STATE")) {
+        if state.lines().any(|l| l.strip_prefix("branch ") == Some(branch)) {
+            return Some(match state.lines().find_map(|l| l.strip_prefix("op ")) {
+                Some("cherry-pick") => "in a cherry-pick",
+                Some("revert") => "in a revert",
+                _ => "being rebased",
+            });
+        }
+    }
+    if let Ok(state) = fs::read_to_string(wt.join("BISECT_STATE")) {
+        if state.lines().any(|l| l.strip_prefix("back ") == Some(branch)) {
+            return Some("being bisected");
+        }
+    }
+    None
+}
+
+/// Another working directory that's using `branch` (see `use_of`), and how.
+pub fn checked_out_elsewhere(repo: &Repo, branch: &str) -> Result<Option<(PathBuf, &'static str)>> {
     for (root, wt, head) in all(repo)? {
-        if wt != repo.wt && matches!(&head, Some(Head::Branch(b)) if b == branch) {
-            return Ok(Some(root));
+        if wt != repo.wt {
+            if let Some(why) = use_of(&wt, &head, branch) {
+                return Ok(Some((root, why)));
+            }
         }
     }
     Ok(None)
@@ -62,13 +88,13 @@ pub fn checked_out_elsewhere(repo: &Repo, branch: &str) -> Result<Option<PathBuf
 /// a bare repository's HEAD doesn't count, since it has no files to fall behind.
 /// Pushes refuse to move such a branch, as git does: its files and index would
 /// still be the old commit's, and its next commit would quietly undo the push.
-pub fn checked_out_anywhere(repo: &Repo, branch: &str) -> Result<Option<PathBuf>> {
-    for (i, (root, _, head)) in all(repo)?.into_iter().enumerate() {
+pub fn checked_out_anywhere(repo: &Repo, branch: &str) -> Result<Option<(PathBuf, &'static str)>> {
+    for (i, (root, wt, head)) in all(repo)?.into_iter().enumerate() {
         if i == 0 && repo.is_bare() {
             continue;
         }
-        if matches!(&head, Some(Head::Branch(b)) if b == branch) {
-            return Ok(Some(root));
+        if let Some(why) = use_of(&wt, &head, branch) {
+            return Ok(Some((root, why)));
         }
     }
     Ok(None)
@@ -100,9 +126,9 @@ fn add(repo: &Repo, path: &str, rev: Option<&str>, new_branch: Option<&str>) -> 
             };
             match repo.branch(&name)? {
                 Some(id) => {
-                    let in_use = all(repo)?.into_iter().find(|(_, _, h)| matches!(h, Some(Head::Branch(b)) if *b == name));
-                    if let Some((other, _, _)) = in_use {
-                        bail!("branch {name} is already checked out in {}; a branch can be in only one worktree at a time (use -b NEW to start another branch)", other.display());
+                    let in_use = all(repo)?.into_iter().find_map(|(root, wt, h)| use_of(&wt, &h, &name).map(|why| (root, why)));
+                    if let Some((other, why)) = in_use {
+                        bail!("branch {name} is already {why} in {}; a branch can be in only one worktree at a time (use -b NEW to start another branch)", other.display());
                     }
                     (Head::Branch(name), id)
                 }

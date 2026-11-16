@@ -440,8 +440,8 @@ pub fn checkout(target: &str, force: bool) -> Result<()> {
     let mut from_remote: Option<String> = None;
     let (new_head, commit_id) = match repo.branch(target)? {
         Some(id) => {
-            if let Some(other) = crate::worktrees::checked_out_elsewhere(&repo, target)? {
-                bail!("branch {target} is checked out in the worktree at {}; a branch can be in only one worktree at a time", other.display());
+            if let Some((other, why)) = crate::worktrees::checked_out_elsewhere(&repo, target)? {
+                bail!("branch {target} is {why} in the worktree at {}; a branch can be in only one worktree at a time", other.display());
             }
             (Head::Branch(target.to_string()), id)
         }
