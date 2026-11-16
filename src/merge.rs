@@ -285,12 +285,20 @@ pub fn with_markers(repo: &Repo, paths: &[String]) -> Vec<String> {
     paths
         .iter()
         .filter(|p| {
-            fs::read_to_string(crate::objects::disk_path(&repo.root, p))
+            let markers = fs::read_to_string(crate::objects::disk_path(&repo.root, p))
                 .map(|text| text.lines().any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> ")))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            markers || moved_aside(repo, p)
         })
         .cloned()
         .collect()
+}
+
+/// A file a file/folder clash moved aside (`x~main`, next to the folder `x`) that
+/// is still there: it needs putting where it belongs (or deleting) first.
+fn moved_aside(repo: &Repo, path: &str) -> bool {
+    let Some((original, _)) = path.rsplit_once('~') else { return false };
+    crate::objects::disk_path(&repo.root, path).exists() && crate::objects::disk_path(&repo.root, original).is_dir()
 }
 
 // ---------------------------------------------------------------- merge base
@@ -379,6 +387,19 @@ pub fn merge_bases(repo: &Repo, a: Id, b: Id) -> Result<Vec<Id>> {
     Ok(best.into_iter().map(|(_, bytes)| Id::from_bytes(bytes)).collect())
 }
 
+thread_local! {
+    /// Set while merging a criss-cross's common ancestors into one virtual base.
+    static INNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this is the inner merge that builds a virtual base (see `base_tree`).
+/// There, what can't be merged keeps the common ancestor's version, as in git, so
+/// the real merge still sees both sides' changes and stops on them; and -X ours /
+/// theirs, which choose between the real sides, don't apply.
+fn inner() -> bool {
+    INNER.with(|i| i.get())
+}
+
 /// The files a merge of `ours` and `theirs` compares both sides against. With one
 /// best common ancestor, its files. With several (a criss-cross), they're first
 /// merged into one "virtual" base, as git does: taking just one would ignore what
@@ -402,7 +423,10 @@ fn virtual_base(repo: &Repo, a: Id, b: Id, depth: usize) -> Result<Files> {
             let mut prev = *first;
             for (i, next) in rest.iter().enumerate() {
                 let base = virtual_base(repo, prev, *next, depth + 1)?;
-                let (m, _) = merge_trees(repo, &base, &merged, &tree(next)?, "Temporary merge branch 1", &format!("Temporary merge branch {}", i + 2))?;
+                let was = INNER.with(|f| f.replace(true));
+                let result = merge_trees(repo, &base, &merged, &tree(next)?, "Temporary merge branch 1", &format!("Temporary merge branch {}", i + 2));
+                INNER.with(|f| f.set(was));
+                let (m, _) = result?;
                 merged = m;
                 prev = *next;
             }
@@ -465,7 +489,9 @@ fn push_conflict_side(out: &mut String, lines: &[&str]) {
 
 /// Merge text line by line. Returns the merged text and the number of conflict blocks.
 pub fn merge_text(base: &str, ours: &str, theirs: &str, ours_label: &str, theirs_label: &str) -> (String, usize) {
-    merge_text_favoring(base, ours, theirs, ours_label, theirs_label, options().favor)
+    // -X ours / theirs choose between the real sides, never inside a virtual base.
+    let favor = if inner() { Favor::None } else { options().favor };
+    merge_text_favoring(base, ours, theirs, ours_label, theirs_label, favor)
 }
 
 /// `merge_text`, with conflicting edits settled for one side (-X ours / theirs).
@@ -856,6 +882,8 @@ pub fn merge_trees(
                     Some(merged_file)
                 }
                 // Deleted on one side, changed on the other: keep the changed version.
+                // (In a virtual base: the ancestor's version, as in git.)
+                (Some(_), None) | (None, Some(_)) if inner() => b,
                 (Some(v), None) | (None, Some(v)) => {
                     conflicts.push((path.clone(), "deleted on one side, changed on the other; kept the changed file"));
                     Some(v)
@@ -943,6 +971,10 @@ fn merge_file(
     // just the mode, say `chmod +x`): that side's contents, with the merged mode.
     // Binary files included: there's nothing to merge line by line.
     if matches!(o_mode, Mode::File | Mode::Exec) && matches!(t_mode, Mode::File | Mode::Exec) {
+        if base.is_none() && o_id == t_id && o_mode != t_mode && !inner() {
+            // Added on both sides, alike but for the executable bit: which is meant?
+            return Ok(((o_mode, o_id), Some("added on both sides with different permissions; kept ours")));
+        }
         let content = match base {
             _ if o_id == t_id => Some(o_id),
             Some((_, b)) if b == o_id => Some(t_id),
@@ -955,6 +987,7 @@ fn merge_file(
     }
     // -X ours / theirs settle what can't be merged line by line, too.
     let whole = match options().favor {
+        _ if inner() => base, // a virtual base keeps the ancestor's version of what can't merge
         Favor::Ours => Some((o_mode, o_id)),
         Favor::Theirs => Some((t_mode, t_id)),
         Favor::None => None,

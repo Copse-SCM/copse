@@ -200,6 +200,34 @@ cps merge origin/B -m merged >/dev/null && (cd "$WORK/cc" && git merge -q --no-e
 same "$(cat f | tr '\n' ' ')" "$(cat "$WORK/cc/f" | tr '\n' ' ')" "a change undone after a criss-cross stays undone, and both sides' other changes merge, as in git"
 cd "$WORK"
 
+echo "== criss-cross merges where a file can't be merged line by line (checked against git)"
+# Both sides change something that can't be merged line by line, then each merges
+# the other keeping its own version (-s ours), so there are two common ancestors
+# that disagree. git's inner merge keeps the ancestor's version there, so the real
+# merge still stops on the conflict; copse must too, and -X must only choose
+# between the real sides.
+criss() {  # NAME BASE-CMD L-CMD R-CMD [MERGE-OPTION]: compare `merge R` on main in git and copse
+  local name=$1 base=$2 l=$3 r=$4 x=${5:-}
+  cd "$WORK" && rm -rf "cc-$name" "cc-$name-c" && git init -q -b main "cc-$name" && cd "cc-$name"
+  sh -c "$base" && git add -A && git commit -qm base && git branch R
+  sh -c "$l" && git add -A && git commit -qm L1 && git branch L
+  git checkout -q R && sh -c "$r" && git add -A && git commit -qm R1
+  git checkout -q main && git merge -q -s ours --no-edit R && git checkout -q R && git merge -q -s ours --no-edit L
+  echo more > zz && git add zz && git commit -qm R3 && git checkout -q main
+  cps clone "$WORK/cc-$name" "$WORK/cc-$name-c" >/dev/null 2>&1
+  # shellcheck disable=SC2086
+  local g c; g=$(git merge --no-edit $x R >/dev/null 2>&1 && echo clean || echo conflict)
+  c=$(cd "$WORK/cc-$name-c" && { out=$(cps merge $x origin/R 2>&1); [[ "$out" == *"conflict"* ]] && echo conflict || echo clean; })
+  echo "$g/$c"
+}
+same "$(criss bin "printf 'A\\0' > bin" "printf 'B\\0' > bin" "printf 'C\\0' > bin")" "conflict/conflict" "a binary file changed differently on each side still stops on a conflict"
+same "$(criss md "echo t > t" "rm t" "echo t2 > t")" "conflict/conflict" "so does a file deleted on one side and edited on the other"
+same "$(criss link "ln -s a l" "rm l; ln -s b l" "rm l; ln -s c l")" "conflict/conflict" "and a symlink changed differently on each side"
+same "$(criss xt "printf '1\\n2\\n3\\n4\\n5\\n' > f" "sed -i.b 's/^4\$/B/' f; rm f.b" "sed -i.b 's/^4\$/C/' f; rm f.b" "-X theirs") $(cat "$WORK/cc-xt-c/f" | tr '\n' ' ')" "clean/clean 1 2 3 C 5 " "-X theirs chooses between the real sides, not inside the merged ancestors"
+cd "$WORK" && rm -rf aa aa-c && git init -q -b main aa && (cd aa && echo k > keep && git add -A && git commit -qm base && git branch other && printf 'a\0b' > f && git add f && git commit -qm f && git checkout -q other && printf 'a\0b' > f && chmod +x f && git add f && git commit -qm "f, executable" && git checkout -q main)
+cps clone "$WORK/aa" "$WORK/aa-c" >/dev/null 2>&1 && (cd aa-c && cps merge origin/other 2>&1 | has "different permissions") && ok "a file added on both sides, alike but for the executable bit, is a conflict (git: add/add)" || fail "line $LINENO: a step before this check failed"
+cd "$WORK"
+
 echo "== content on one side, permissions on the other (checked against git)"
 cd "$WORK" && rm -rf mx mx-copse && git init -q -b main mx && cd mx
 printf 'a\0b' > bin && printf 'one\n' > run.sh && git add -A && git commit -qm base && git branch other
@@ -217,6 +245,7 @@ cd "$WORK" && rm -rf fileclash && mkdir fileclash && cd fileclash && cps init >/
 echo mine > x && cps commit -m "file x" >/dev/null && cps checkout other >/dev/null && mkdir x && echo theirs > x/y && cps commit -m "folder x" >/dev/null && cps checkout main >/dev/null
 out=$(cps merge other 2>&1)
 [[ "$out" == *"x~main"* && $(cat x~main) == mine && $(cat x/y) == theirs ]] && ok "the file is moved aside to x~main (git: x~HEAD) as a conflict, and the folder is written" || fail "$out"
+expect_fail "the merge can't be committed while the moved-aside file is still there" "conflicts to fix" cps commit -m "too soon"
 mv x~main x/from-main && cps commit -m "merged" >/dev/null && same "$(cps ls-files | tr '\n' ' ')" "keep x/from-main x/y " "after moving it where it belongs, the merge commits" || fail "line $LINENO: a step before this check failed"
 cps reset --hard HEAD~1 >/dev/null && cps checkout other >/dev/null
 out=$(cps rebase main 2>&1); [[ "$out" == *"x~"* && -f x/y ]] && cps rebase --abort >/dev/null && cps status | has "On branch other" && ok "a rebase stops on it the same way, and can be aborted" || fail "$out"

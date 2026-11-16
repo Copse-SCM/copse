@@ -1040,7 +1040,7 @@ fn continue_rebase(repo: &Repo) -> Result<()> {
         for p in &unresolved {
             println!("  {} {}", paint("31", "C"), crate::objects::quote_path(p));
         }
-        bail!("{} file(s) still have conflict markers; fix them, then run `copse rebase --continue` again", unresolved.len());
+        bail!("{} file(s) still have conflicts to fix (conflict markers, or a file moved aside to x~branch to put where it belongs); fix them, then run `copse rebase --continue` again", unresolved.len());
     }
 
     let commit = repo.read_commit(&stopped)?;

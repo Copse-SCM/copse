@@ -176,7 +176,7 @@ pub fn status(porcelain: bool) -> Result<()> {
     }
     if let Some(m) = MergeState::load(&repo)? {
         let unresolved = m.unresolved(&repo);
-        println!("Merging {} ({} file(s) still have conflict markers)", m.label, unresolved.len());
+        println!("Merging {} ({} file(s) still have conflicts to fix)", m.label, unresolved.len());
         for p in &unresolved {
             println!("  {} {}", paint("31", "C"), crate::objects::quote_path(p));
         }
@@ -273,7 +273,7 @@ pub fn commit(message: Option<&str>, paths: &[String], amend: bool, no_verify: b
             for p in &unresolved {
                 println!("  {} {}", paint("31", "C"), crate::objects::quote_path(p));
             }
-            bail!("{} file(s) still have conflict markers; fix them before committing", unresolved.len());
+            bail!("{} file(s) still have conflicts to fix (conflict markers, or a file moved aside to x~branch to put where it belongs); fix them before committing", unresolved.len());
         }
     }
 

@@ -78,7 +78,7 @@ expect_fail "commit is refused mid-rebase" "rebase is in progress" cps commit -m
 expect_fail "checkout is refused mid-rebase" "rebase is in progress" cps checkout main
 expect_fail "merge is refused mid-rebase" "rebase is in progress" cps merge main
 expect_fail "starting another rebase is refused" "already in progress" cps rebase main
-expect_fail "continue with markers left is refused" "still have conflict markers" cps rebase --continue
+expect_fail "continue with markers left is refused" "still have conflicts to fix" cps rebase --continue
 printf 'ONE-both\n2\n3\n4\n5\n' > shared.txt
 cps status | has "Conflicts are fixed" && ok "status notices the fix" || fail "line $LINENO: a step before this check failed"
 cps rebase --continue | tail -1 | has "Rebased feature onto main" && ok "continue finishes the rebase" || fail "line $LINENO: a step before this check failed"

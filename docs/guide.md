@@ -133,7 +133,7 @@ copse honours `.gitignore` files and also reads `.copseignore`, which uses the s
 
 - **Already contained:** if your branch already contains `feature`, it says "Already up to date".
 - **Fast-forward:** if `feature` is directly ahead of you, your branch just moves forward to it.
-- **Three-way merge:** otherwise each file is compared across base, yours and theirs. A file changed on only one side takes that side, including deletions. A file changed on both sides is merged line by line. If that's clean, copse makes a merge commit with two parents right away. The base is the newest commit both sides share. After a "criss-cross" (two branches that each merged the other) there are several such commits; as git does, copse first merges them into one base, so a change one side undid since doesn't come back.
+- **Three-way merge:** otherwise each file is compared across base, yours and theirs. A file changed on only one side takes that side, including deletions. A file changed on both sides is merged line by line. If that's clean, copse makes a merge commit with two parents right away. The base is the newest commit both sides share. After a "criss-cross" (two branches that each merged the other) there are several such commits; as git does, copse first merges them into one base, so a change one side undid since doesn't come back. Where those ancestors disagree on something that can't be merged line by line (a binary file, a symlink, a file deleted in one), the base keeps their common ancestor's version, so the merge still stops on it rather than quietly taking one side; `-X ours`/`theirs` only choose between your branch and the one you're merging.
 - **Conflicts:** overlapping edits get git-style markers:
   ```
   <<<<<<< main
@@ -143,7 +143,7 @@ copse honours `.gitignore` files and also reads `.copseignore`, which uses the s
   >>>>>>> feature
   ```
   Edit the files, then run `copse commit`; the message defaults to "Merge feature into main". `copse status` lists the files that still have markers, and `commit` refuses until they're gone. `copse merge --abort` puts everything back.
-- **Files that can't be merged line by line:** binary files and symlinks changed on both sides, and files deleted on one side but edited on the other, are reported as conflicts. (A file whose contents changed on one side and permissions on the other, such as `chmod +x`, isn't a conflict: it gets both, binary or not.) A file on one side where the other has a folder of the same name (`x` and `x/y`) is a conflict too: as in git, the folder is written and the file is moved aside to `x~<branch>` (git says `x~HEAD` for yours), for you to put where it belongs before committing. copse keeps one version (yours, or the edited one) for you to check.
+- **Files that can't be merged line by line:** binary files and symlinks changed on both sides, and files deleted on one side but edited on the other, are reported as conflicts. (A file whose contents changed on one side and permissions on the other, such as `chmod +x`, isn't a conflict: it gets both, binary or not.) A file on one side where the other has a folder of the same name (`x` and `x/y`) is a conflict too: as in git, the folder is written and the file is moved aside to `x~<branch>` (git says `x~HEAD` for yours), for you to put where it belongs (or delete): `copse commit` and `--continue` wait until it's gone from beside the folder. A file added on both sides with the same contents but different permissions is a conflict too, as in git. copse keeps one version (yours, or the edited one) for you to check.
 - **Renames are followed**, as git follows them, in merge, rebase, cherry-pick, revert and stash. A file renamed on one side and edited on the other ends up renamed with both changes. A rename counts when the content is identical or at least 50% the same.
   - Renamed differently on each side: both names get both sides' changes, and it's reported as a conflict.
   - Renamed on one side and deleted on the other: the renamed file is kept, and it's reported.
@@ -601,7 +601,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `tags.sh` | 20 | Local tags |
 | `tui.sh` | 78 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |
-| `workflow.sh` | 82 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
+| `workflow.sh` | 88 | `merge --no-ff`/`--ff-only`, `-s ours` and `-X ours`/`theirs` (checked against git), folder moves, `rebase --onto`, `--autosquash`, `exec`, stashing some files |
 
 `cargo test` runs unit tests for merging, hunks, the rebase list, timezones and git's formats (checked against hashes real git produces). `tests/fuzz.py` is a randomized stress test: it builds the same random histories in git and copse (edits, inserts, deletions, new files, renames, folder moves), then merges, rebases and cherry-picks in both and compares the results file by file. Run `tests/fuzz.py 500 <seed>`; 2,000 rounds across eight seeds match git exactly.
 
