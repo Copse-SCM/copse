@@ -114,9 +114,15 @@ pub fn fast_forward(repo: &Repo, index: &mut Index, from: Id, to: Id) -> Result<
                     in_the_way.push(format!("{} (changed here)", crate::objects::quote_path(path)));
                 }
             }
-            // A file the pull adds, where an untracked file already is.
+            // A file the pull adds, where an untracked file already is (not just the
+            // committed file it replaces, spelled in another case on a disk that
+            // ignores case: README -> readme).
             (None, None) if on_disk && !fs::metadata(crate::objects::disk_path(&repo.root, path)).is_ok_and(|m| m.is_dir()) => {
-                in_the_way.push(format!("{} (untracked here)", crate::objects::quote_path(path)));
+                let renamed_in_case = crate::cmd::ignores_case(&repo.root)
+                    && crate::cmd::name_on_disk(&repo.root, path).is_some_and(|real| real != *path && leaving.contains(real.as_str()));
+                if !renamed_in_case {
+                    in_the_way.push(format!("{} (untracked here)", crate::objects::quote_path(path)));
+                }
             }
             _ => {}
         }

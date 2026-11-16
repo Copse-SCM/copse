@@ -186,6 +186,17 @@ out=$(cps checkout secret 2>&1) && fail "a checkout writing over an ignored file
 rm s.env
 cd ..
 
+echo "== renames that only change case, and files already as they'd be written"
+mkdir casey && cd casey && cps init >/dev/null && mkdir Docs && echo a > Docs/a.txt && echo R > README && cps commit -m one >/dev/null
+cps branch lower >/dev/null && cps checkout lower >/dev/null && mv Docs tmp && mv tmp docs && mv README tmp && mv tmp readme && cps commit -m lower >/dev/null
+cps checkout main >/dev/null && [[ -f Docs/a.txt && -f README ]] && ok "checking out across a folder renamed only in case works (it isn't an untracked file in the way)" || fail "line $LINENO: $(ls)"
+cps merge lower >/dev/null && [[ "$(cps ls-files | tr '\n' ' ')" == "docs/a.txt readme " ]] && ok "and so does a fast-forward across it" || fail "line $LINENO: $(cps ls-files)"
+cps reset --hard HEAD~1 >/dev/null && same "$(cps ls-files | tr '\n' ' ')" "Docs/a.txt README " "and reset --hard back"
+cd .. && mkdir same && cd same && cps init >/dev/null && echo secret > .env && echo a > a && cps commit -m one >/dev/null
+echo .env > .gitignore && rm .env && cps commit -m "untrack .env" >/dev/null && echo secret > .env
+cps undo >/dev/null 2>&1 && [[ $(cat .env) == secret ]] && cps status | has "Nothing changed" && ok "an ignored file already holding exactly what's written doesn't block undo" || fail "line $LINENO: a step before this check failed"
+cd ..
+
 echo "== checkout --force keeps a copy of what it discards"
 mkdir forced && cd forced && cps init >/dev/null && echo one > a && echo keep > b && cps commit -m one >/dev/null
 cps branch two >/dev/null && cps checkout two >/dev/null && echo two > a && echo theirs > n && cps commit -m two >/dev/null && cps checkout main >/dev/null

@@ -626,33 +626,28 @@ pub(crate) fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_writ
     };
     // A file copse doesn't know (an ignored one: the scan never reports those)
     // where one is written would be replaced with no copy kept anywhere.
-    let mut unknown: Vec<&str> = to_write
+    let mut unknown: Vec<(&str, Mode, Id)> = to_write
         .par_iter()
         .filter(|&&(path, mode, _)| mode != Mode::Submodule && !known(path) && !to_remove.contains(path))
         .filter(|&&(path, _, _)| fs::symlink_metadata(crate::objects::disk_path(&repo.root, path)).is_ok_and(|m| !m.is_dir()))
-        .map(|&(path, _, _)| path)
+        .copied()
         .collect();
     if !unknown.is_empty() && ignores_case(&repo.root) {
-        // On a disk that ignores case, `README` may really be the `readme` copse
-        // knows (a rename that only changes case): look up the name it has.
-        unknown.retain(|p| {
-            let full = crate::objects::disk_path(&repo.root, p);
-            let (Some(dir), Some(name)) = (full.parent(), full.file_name()) else { return true };
-            let want = fold_path(&name.to_string_lossy());
-            let Ok(entries) = fs::read_dir(dir) else { return true };
-            !entries.flatten().any(|e| {
-                let on_disk = e.file_name().to_string_lossy().to_string();
-                if fold_path(&on_disk) != want || e.file_name() == name {
-                    return false;
-                }
-                let rel = match p.rsplit_once('/') {
-                    Some((parent, _)) => format!("{parent}/{on_disk}"),
-                    None => on_disk,
-                };
-                known(&rel) || to_remove.contains(&rel)
-            })
+        // On a disk that ignores case, `Docs/README` may really be the `docs/readme`
+        // copse knows (a rename that only changes case): look up the name it has.
+        unknown.retain(|&(p, _, _)| match name_on_disk(&repo.root, p) {
+            Some(real) if real != p => !(known(&real) || to_remove.contains(&real)),
+            _ => true,
         });
     }
+    // A file that already holds exactly what would be written isn't in the way:
+    // writing it changes nothing (an ignored copy of a file the branch has, say).
+    unknown.retain(|&(p, mode, id)| {
+        let full = crate::objects::disk_path(&repo.root, p);
+        let same_mode = fs::symlink_metadata(&full).is_ok_and(|m| crate::worktree::stat_of(&m).mode == mode);
+        !(same_mode && crate::worktree::read_content(&full, mode).is_ok_and(|data| crate::objects::blob_id_like(&id, &data) == id))
+    });
+    let unknown: Vec<&str> = unknown.into_iter().map(|(p, _, _)| p).collect();
     if let Some(path) = unknown.first() {
         bail!("{path} is in the way: copse doesn't track it (it may be ignored), and a file goes there; move or delete it and try again. Nothing was changed");
     }
@@ -709,6 +704,21 @@ pub(crate) fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_writ
         }
         Ok(())
     })
+}
+
+/// The name `path` has on disk, folder by folder, where the disk ignores case
+/// (`Docs/README` may be stored as `docs/readme`). None if it isn't there.
+pub(crate) fn name_on_disk(root: &std::path::Path, path: &str) -> Option<String> {
+    let mut dir = root.to_path_buf();
+    let mut out = Vec::new();
+    for part in path.split('/') {
+        let want = fold_path(part);
+        let found = fs::read_dir(&dir).ok()?.flatten().map(|e| e.file_name()).find(|n| fold_path(&n.to_string_lossy()) == want)?;
+        let name = found.to_string_lossy().to_string();
+        dir.push(&found);
+        out.push(name);
+    }
+    Some(out.join("/"))
 }
 
 /// A path as a disk that ignores case (macOS, Windows, some Linux mounts) sees it,

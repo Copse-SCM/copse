@@ -97,7 +97,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse clean [-f] [-x] [paths]` | Remove new files that were never committed. Without `-f` it only lists them; with `-f` they're saved as a stash first. `-x` also removes ignored files. |
 | `copse grep <pattern> [rev] [-- paths]` | Search your files, or any revision's, with a regular expression. `-i`, `-l` (file names), `-c` (counts); exits 1 when nothing matches. |
 | `copse blame <file> [rev] [-L start,end]` | Who last changed each line, in which commit and when, following history through merges. Without a revision it explains your file as it is now, marking lines you haven't committed. Matches `git blame` line for line. |
-| `copse bisect start <bad> <good>` | Find the commit that introduced a problem by binary search. Then `copse bisect good` / `bad` / `skip` for each commit it checks out, or `copse bisect run <command>` to automate it (exit 0 = good, 125 = skip, other = bad). `copse bisect reset` takes you back. Each step refuses (marking nothing) if you've edited committed files, so testing a fix never loses it; new files stay. |
+| `copse bisect start <bad> <good>` | Find the commit that introduced a problem by binary search. Then `copse bisect good` / `bad` / `skip` for each commit it checks out, or `copse bisect run <command>` to automate it (exit 0 = good, 125 = skip, other = bad). `copse bisect reset` takes you back. Your uncommitted changes carry over from commit to commit, as in git; a step refuses (marking nothing) only if the next commit has one of the files you changed differently, so testing a fix never loses it. |
 | `copse git-view on` / `off` | Keep a read-only `.git` folder up to date, so editors and tools that read `.git` see copse's history and changes |
 | `copse lfs track <pattern>` / `untrack` / `ls-files` / `pull` / `push` | Git LFS: large files on an LFS server, pointers in history (see below) |
 | `copse config <key> [value]` | Read or change a setting (`--global` for every repository, `--unset`, `--list`); see below |
@@ -109,7 +109,7 @@ Run `copse` on its own (or `copse ui`) for a full-screen view of the repository:
 | `copse rebase --autosquash <rev>` | Fold `fixup! X` and `squash! X` commits into commit X |
 | `copse rebase -x <cmd> <rev>` | Run a command after each commit (e.g. the tests); if it fails, the rebase pauses there so you can fix it |
 | `copse rebase --continue` / `--skip` / `--abort` | Carry on after fixing conflicts, drop the conflicting commit, or undo the whole rebase |
-| `copse checkout <rev>` (`co`) | Switch to a branch, a commit id prefix, `origin/main`, or `HEAD~N`. A branch only the remote has (`origin/feature`) can be checked out as `feature`: copse makes the local branch from it, as git does. Refuses if you have uncommitted changes; `-f` discards them, saving them as a stash first (`copse stash apply 0` brings them back), and untracked files are always kept. A checkout happens completely or not at all: if an untracked or ignored file is in the way (where a file of the branch goes, inside a folder that has to become a file, or where a folder has to go), it's refused before anything changes, and the file is never removed for you. |
+| `copse checkout <rev>` (`co`) | Switch to a branch, a commit id prefix, `origin/main`, or `HEAD~N`. A branch only the remote has (`origin/feature`) can be checked out as `feature`: copse makes the local branch from it, as git does. Refuses if you have uncommitted changes; `-f` discards them, saving them as a stash first (`copse stash apply 0` brings them back), and untracked files are always kept. A checkout happens completely or not at all: if an untracked or ignored file is in the way (where a file of the branch goes, inside a folder that has to become a file, or where a folder has to go; a file already holding exactly what's written isn't in the way, nor is one a rename that only changes case left under its old spelling), it's refused before anything changes, and the file is never removed for you. |
 | `copse gc [--prune when]` | Pack all objects into one file (older versions as compact deltas) and remove unused objects once they're two weeks old |
 | `copse fsck` | Check that every object is intact and that everything branches, tags, stashes and the reflog need is there |
 | `copse clone <url> [dir] [--depth N] [--filter=blob:none] [--recurse-submodules]` | Copy a repository and check out its main branch. `--depth N` fetches only the newest N commits; `--filter=blob:none` fetches file contents only when needed (both copse remotes); `--recurse-submodules` checks submodules out too |
@@ -588,14 +588,14 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `github.sh` | 139 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
-| `investigate.sh` | 35 | `blame` (every line compared with `git blame`) and `bisect` |
+| `investigate.sh` | 37 | `blame` (every line compared with `git blame`) and `bisect` |
 | `layout.sh` | 67 | Tags between copse repositories, shallow clones, sparse checkout, worktrees |
 | `plumbing.sh` | 42 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
 | `rebase.sh` | 88 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
 | `remote.sh` | 41 | Clone, push, pull, conflicts, force push, the SSH path, corruption detection, `status` against the remote |
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
-| `safety.sh` | 60 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
+| `safety.sh` | 64 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 27 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
 | `stash.sh` | 37 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |

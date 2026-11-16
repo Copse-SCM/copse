@@ -115,6 +115,12 @@ expect_fail "bisect good won't overwrite an uncommitted edit" "commit or stash" 
 [[ "$(cat n.txt)" == "$before" && "$(cps bisect | sed -n 1p)" == "$marks" ]] && ok "the edit stays, and nothing was marked" || fail "line $LINENO: n.txt changed or a mark was made"
 cps restore n.txt >/dev/null
 cps bisect reset >/dev/null
+cd .. && rm -rf bis2 && mkdir bis2 && cd bis2 && cps init >/dev/null && echo v1 > const.lock
+for i in $(seq 1 20); do echo "$i" > n.txt; [[ $i -ge 12 ]] && echo broken > bug.txt; cps commit -m "c$i" >/dev/null; done
+cps bisect start HEAD HEAD~19 >/dev/null
+out=$(cps bisect run sh -c 'echo touched >> const.lock; test ! -f bug.txt' 2>&1 || true); [[ "$out" == *"    c12"* ]] && ok "bisect run carries on when the script edits a file no commit changes (a lock file, say), as git does" || fail "$out"
+grep -q touched const.lock && cps status | has "M const.lock" && ok "and that edit is kept, as an uncommitted change" || fail "line $LINENO: $(cps status)"
+cps restore const.lock >/dev/null && cps bisect reset >/dev/null && cd ../bis
 cps checkout keepme~3 >/dev/null 2>&1 && cps bisect start HEAD HEAD~5 >/dev/null && cps bisect reset | has "back on" && cps status | has "HEAD detached at" && ok "starting from a detached HEAD goes back there" || fail "line $LINENO: a step before this check failed"
 cps checkout main >/dev/null
 expect_fail "marks need a bisect" "no bisect is in progress" cps bisect good

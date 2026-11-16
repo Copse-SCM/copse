@@ -223,13 +223,53 @@ pub fn bisect_ids(repo: &Repo) -> Result<Vec<Id>> {
 }
 
 /// Move the working directory and a detached HEAD to `id`.
+/// Uncommitted changes carry over, as in git: an edited (or deleted) committed
+/// file the two commits have alike stays as you left it, and still shows as a
+/// change. (Ones they don't have alike are refused first: `edits_in_the_way`.)
 fn move_to(repo: &Repo, id: &Id) -> Result<()> {
     let mut index = Index::load(&repo.wt)?;
     let files = snapshot(&repo.root, &index, None)?;
-    let tree = flatten(&repo.store, &repo.read_commit(id)?.tree)?;
+    let target = flatten(&repo.store, &repo.read_commit(id)?.tree)?;
+    let here = match repo.head_commit()? {
+        Some(h) => flatten(&repo.store, &repo.read_commit(&h)?.tree)?,
+        None => Default::default(),
+    };
+    let ch = changes(&index, &files);
+    let current: HashMap<&str, (Mode, Id)> = files.iter().map(|f| (f.path.as_str(), (f.mode, f.id))).collect();
+    let mut tree = target.clone();
+    for p in &ch.modified {
+        if here.get(p) == target.get(p) {
+            if let Some(v) = current.get(p.as_str()) {
+                tree.insert(p.clone(), *v);
+            }
+        }
+    }
+    for p in &ch.deleted {
+        if here.get(p) == target.get(p) {
+            tree.remove(p);
+        }
+    }
     apply_tree(repo, &mut index, &files, &tree, &[])?;
+    crate::merge::stage_as_changes(&mut index, &tree, &target);
     index.save(&repo.wt)?;
     repo.set_head(&Head::Detached(*id))
+}
+
+/// Your changes the move to commit `next` would overwrite: edits to (or deletions
+/// of) committed files that differ between here and there, and new files where
+/// `next` has one. Everything else carries over (see `move_to`).
+fn edits_in_the_way(repo: &Repo, next: &Id) -> Result<Vec<String>> {
+    let index = Index::load(&repo.wt)?;
+    let ch = changes(&index, &snapshot(&repo.root, &index, None)?);
+    let target = flatten(&repo.store, &repo.read_commit(next)?.tree)?;
+    let here = match repo.head_commit()? {
+        Some(h) => flatten(&repo.store, &repo.read_commit(&h)?.tree)?,
+        None => Default::default(),
+    };
+    let mut out: Vec<String> = ch.modified.iter().chain(&ch.deleted).filter(|p| here.get(*p) != target.get(*p)).cloned().collect();
+    out.extend(ch.added.iter().filter(|p| target.contains_key(*p)).cloned());
+    out.sort();
+    Ok(out)
 }
 
 fn require_clean(repo: &Repo, what: &str) -> Result<()> {
@@ -245,14 +285,20 @@ fn require_clean(repo: &Repo, what: &str) -> Result<()> {
 /// Uncommitted edits to committed files would be overwritten by the next commit a
 /// bisect checks out, so a step refuses before marking anything. New files are
 /// fine: they stay, and checkout refuses any the next commit has in their place.
-fn require_no_edits(repo: &Repo, what: &str) -> Result<()> {
-    let index = Index::load(&repo.wt)?;
-    let ch = changes(&index, &snapshot(&repo.root, &index, None)?);
-    let edits = ch.modified.len() + ch.deleted.len();
-    if edits > 0 {
-        let only = crate::worktree::Changes { added: vec![], modified: ch.modified, deleted: ch.deleted };
-        print_changes(&only);
-        bail!("{what} would overwrite {edits} uncommitted change(s); commit or stash them first (nothing was marked)");
+/// Before marking: if the mark leads to checking out another commit, refuse (with
+/// nothing marked) when that would overwrite your changes. Ends of the bisect,
+/// and changes the two commits don't touch, are fine.
+fn require_no_edits(repo: &Repo, b: &Bisect, what: &str) -> Result<()> {
+    if b.bad.is_none() || b.good.is_empty() {
+        return Ok(());
+    }
+    let Next::Test(next, _) = next_step(repo, b)? else { return Ok(()) };
+    let lost = edits_in_the_way(repo, &next)?;
+    if !lost.is_empty() {
+        for p in &lost {
+            println!("  {}", crate::objects::quote_path(p));
+        }
+        bail!("{what} would overwrite {} uncommitted change(s) (the next commit to test has those files differently); commit or stash them first (nothing was marked)", lost.len());
     }
     Ok(())
 }
@@ -388,7 +434,6 @@ pub fn bisect(cmd: BisectCmd) -> Result<()> {
             let is_bad = matches!(cmd, BisectCmd::Bad(_));
             let mut b = Bisect::load(&repo)?.context("no bisect is in progress; start one with `copse bisect start BAD GOOD`")?;
             let id = current(rev)?;
-            require_no_edits(&repo, "moving to the next commit to test")?;
             if is_good {
                 b.good.push(id);
             } else if is_bad {
@@ -396,6 +441,7 @@ pub fn bisect(cmd: BisectCmd) -> Result<()> {
             } else {
                 b.skipped.push(id);
             }
+            require_no_edits(&repo, &b, "moving to the next commit to test")?;
             b.save(&repo)?;
             advance(&repo, &b)?;
         }
@@ -453,12 +499,12 @@ pub fn bisect(cmd: BisectCmd) -> Result<()> {
                     c => bail!("`{line}` failed with status {c} (128 or more stops the bisect)"),
                 };
                 println!("{} {verdict} (exit {code})", short(&id));
-                require_no_edits(&repo, &format!("`{line}` changed committed files, and moving on"))?;
                 match verdict {
                     "good" => b.good.push(id),
                     "skip" => b.skipped.push(id),
                     _ => b.bad = Some(id),
                 }
+                require_no_edits(&repo, &b, &format!("moving on from what `{line}` left"))?;
                 b.save(&repo)?;
                 if advance(&repo, &b)? {
                     break;
