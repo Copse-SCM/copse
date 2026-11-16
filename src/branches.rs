@@ -114,11 +114,30 @@ fn delete(repo: &Repo, name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Every branch's name, spelled as stored.
+fn branch_names(repo: &Repo) -> Result<Vec<String>> {
+    Ok(repo.branches()?.into_iter().map(|(b, _)| b).collect())
+}
+
 fn rename(repo: &Repo, old: &str, new: &str, force: bool) -> Result<()> {
     validate_branch(new)?;
     repo.branch(old)?.with_context(|| format!("there is no branch called {old}"))?;
     if old == new {
         bail!("{old} already has that name");
+    }
+    // Only the case changes (Feature -> feature): on a disk that ignores case both
+    // names are one file, so `new` looks taken by `old` itself. Rename through a
+    // temporary name instead of "replacing" (deleting) it.
+    if old.eq_ignore_ascii_case(new) && crate::cmd::ignores_case(&repo.dir) && !branch_names(repo)?.iter().any(|b| b == new) {
+        not_mid_rebase(repo, old)?;
+        if let Some((other, why)) = crate::worktrees::checked_out_elsewhere(repo, old)? {
+            bail!("{old} is {why} in the worktree at {}; rename it from there (once that's finished)", other.display());
+        }
+        let temp = format!("{old}.renaming-{}", std::process::id());
+        repo.rename_branch(old, &temp)?;
+        repo.rename_branch(&temp, new)?;
+        println!("Renamed branch {old} to {new}.");
+        return Ok(());
     }
     if repo.branch(new)?.is_some() && !force {
         bail!("branch {new} already exists; use `copse branch -M {old} {new}` to replace it");

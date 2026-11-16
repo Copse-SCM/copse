@@ -212,6 +212,20 @@ fn remove(repo: &Repo, path: &str, force: bool) -> Result<()> {
     if wt == repo.wt {
         bail!("you're inside that worktree; run this from another one");
     }
+    // Never from under a copse command running there, --force or not; and a
+    // rebase, merge or bisect in progress there is work too.
+    if root.exists() {
+        let other = Repo::open_path(&root)?;
+        let Some(_busy_check) = other.try_lock_operation("worktree remove") else {
+            bail!("a copse command is running in that worktree; wait for it to finish");
+        };
+        let busy = [("REBASE_STATE", "a rebase, cherry-pick or revert"), ("MERGE_STATE", "a merge"), ("BISECT_STATE", "a bisect")]
+            .into_iter()
+            .find(|(f, _)| other.wt.join(f).exists());
+        if let (Some((_, what)), false) = (busy, force) {
+            bail!("that worktree is in the middle of {what}; finish or abort it there, or use --force to throw it away");
+        }
+    }
     if root.exists() && !force {
         let other = Repo::open_path(&root)?;
         let index = Index::load(&other.wt)?;

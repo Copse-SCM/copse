@@ -164,7 +164,7 @@ copse records every move of HEAD and of each branch (commits, checkouts, merges,
 
 ## Stashing
 
-`copse stash` puts your uncommitted work aside (edits, new files, deletions, permission changes and symlinks) and resets your files to the last commit. Ignored files are left alone. `copse stash pop` brings the work back as uncommitted changes, exactly as it was. If a stashed file has been renamed since, its changes come back in the renamed file, as with a merge.
+`copse stash` puts your uncommitted work aside (edits, new files, deletions, permission changes and symlinks) and resets your files to the last commit. Ignored files are left alone. `copse stash pop` brings the work back as uncommitted changes, exactly as it was. If a stashed file has been renamed since, its changes come back in the renamed file, as with a merge; changes to files outside a sparse checkout are written out too.
 
 - **Several stashes stack up:** 0 is the newest. `copse stash list` shows them with their notes and times.
 - **History can move on in between.** Bringing a stash back uses the same three-way merge as `copse merge`, so it works after you've made new commits or switched to another branch. That's also a handy way to move unfinished work to a different branch.
@@ -419,7 +419,7 @@ copse push                   # uploads the files' contents to the LFS server, th
 copse worktree add ../hotfix -b hotfix     # new folder, new branch from where you are
 copse worktree add ../review feature-x     # an existing branch
 copse worktree list
-copse worktree remove ../hotfix            # refuses if it has uncommitted changes or a repository inside (--force to discard)
+copse worktree remove ../hotfix            # refuses with uncommitted changes, a repository inside (ignored folders too), or a rebase/merge in progress (--force to discard); never while a command runs there
 ```
 
 - **Shared:** history, branches, tags, stashes and settings, so a commit made in one is visible in the others at once.
@@ -580,16 +580,16 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `branches.sh` | 56 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
+| `branches.sh` | 57 | Deleting and renaming branches, names with slashes, locally, on copse remotes and on a real git server |
 | `bridge.sh` | 52 | The `.git` view, read by git itself (log, branches, tags, status, diff, blame, fsck, and that git can't change it); Git LFS against a local LFS server |
 | `commit.sh` | 64 | Partial commits, `commit -p` (with split and edit), `--amend`, and `log` (`--graph`, path filtering, `--pretty`, `--format` and `--date` checked against git) |
-| `config.sh` | 65 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
+| `config.sh` | 66 | Settings, aliases (including shell aliases and loops), every ignore file, every hook, `--no-verify`, `core.hooksPath` |
 | `diff.sh` | 30 | `diff` and `show`, with `--stat` checked against git's output for the same commits |
 | `github.sh` | 139 | Real git servers, including a local smart-HTTP server with sign-in: `fsck --strict` after every push, byte-for-byte clones, history made with git (delta chains, binary, unicode, symlinks, merges, tags, signature headers), working alongside a git user, shallow and partial clones from a git server, the dumb protocol (cgit), and names and messages that aren't UTF-8 |
 | `history.sh` | 39 | `cherry-pick`, `revert`, `clean`, `grep` |
 | `interop.sh` | 51 | Signed commits (SSH and GPG, verified by git and vice versa), submodules, partial clones |
 | `investigate.sh` | 35 | `blame` (every line compared with `git blame`) and `bisect` |
-| `layout.sh` | 64 | Tags between copse repositories, shallow clones, sparse checkout, worktrees |
+| `layout.sh` | 67 | Tags between copse repositories, shallow clones, sparse checkout, worktrees |
 | `plumbing.sh` | 42 | Revision names (`^N`, `@`, `^{tree}`, `REV:path`), `show REV:path`, `cat-file`, `rev-parse`, `ls-tree`, `ls-files`, `hash-object`, checked against git |
 | `pack.sh` | 20 | Packing long edit chains, binary and large files; every commit reads back identical; damaged packs are caught |
 | `rebase.sh` | 88 | Rebase and interactive rebase: every action, reordering, conflicts, edit pauses, splitting, cancelling, `pull --rebase` |
@@ -597,7 +597,7 @@ Every suite builds real repositories in a fresh folder and checks what copse doe
 | `restore.sh` | 42 | `restore` and `reset`, including the automatic backups |
 | `safety.sh` | 60 | `fsck`, `gc` pruning and its grace period, crash safety, large files with measured memory use |
 | `security.sh` | 27 | Hostile repositories: `..`, `.copse` and disguises, symlink tricks, ssh option injection, hostile submodule URLs |
-| `stash.sh` | 36 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
+| `stash.sh` | 37 | Every kind of change saved and restored byte for byte, several stashes, conflicts, surviving `gc` |
 | `tags.sh` | 20 | Local tags |
 | `tui.sh` | 78 | The interactive screen, driven by `copse ui --replay KEYS` (which presses keys and prints the screen), with every action checked with the command line |
 | `undo.sh` | 23 | The reflog and `undo` |

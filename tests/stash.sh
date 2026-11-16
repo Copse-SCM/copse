@@ -113,6 +113,12 @@ echo precious > precious.txt && cps stash -m precious >/dev/null
 cps gc --prune now >/dev/null && [[ -z "$(find .copse/objects -type f -not -path '*/pack/*')" ]] && ok "everything packed, and unused objects removed" || fail "line $LINENO: a step before this check failed"
 cps stash pop >/dev/null && same "$(cat precious.txt)" "precious" "stash still restores after gc" || fail "line $LINENO: a step before this check failed"
 
+echo "== restore with a sparse checkout"
+cd .. && rm -rf sparsy && mkdir sparsy && cd sparsy && cps init >/dev/null && mkdir out keep && echo orig > out/x && echo k > keep/k && cps commit -m one >/dev/null
+echo EDIT > out/x && cps stash >/dev/null && cps sparse set keep >/dev/null && cps stash pop >/dev/null
+same "$(cat out/x) $(cps stash list)" "EDIT No stashes." "a stashed edit to a file outside the sparse checkout comes back (it isn't dropped with the stash)"
+cps sparse disable >/dev/null 2>&1 || true
+
 echo "== restore after the file was renamed"
 cd .. && rm -rf renamed && mkdir renamed && cd renamed && cps init >/dev/null && seq 1 20 > a.txt && cps commit -m base >/dev/null
 sed 's/^5$/STASHED/' a.txt > a.tmp && mv a.tmp a.txt && cps stash >/dev/null

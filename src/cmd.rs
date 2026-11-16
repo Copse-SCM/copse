@@ -713,7 +713,7 @@ pub(crate) fn check_way_clear(repo: &Repo, to_remove: &BTreeSet<String>, to_writ
 
 /// A path as a disk that ignores case (macOS, Windows, some Linux mounts) sees it,
 /// also dropping the characters macOS ignores.
-fn fold_path(path: &str) -> String {
+pub(crate) fn fold_path(path: &str) -> String {
     path.chars().filter(|c| !crate::objects::hfs_ignorable(*c)).flat_map(char::to_lowercase).collect()
 }
 

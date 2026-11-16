@@ -466,8 +466,35 @@ fn is_nested_repo(e: &ignore::DirEntry) -> bool {
 }
 
 /// Repositories inside this one (submodules or not), whose files are their own.
-pub fn nested_repos(root: &Path, index: &Index) -> Vec<String> {
-    scan(root, index).into_iter().filter(|s| s.mode == Mode::Submodule).map(|s| s.path).collect()
+/// Ignored folders are looked in too (a checkout of a library in an ignored
+/// `vendor/` is still someone's work).
+pub fn nested_repos(root: &Path, _index: &Index) -> Vec<String> {
+    let found = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let found_in = found.clone();
+    let root_owned = root.to_path_buf();
+    WalkBuilder::new(root)
+        .standard_filters(false)
+        .hidden(false)
+        .filter_entry(move |e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if e.file_name() == ".copse" || e.file_name() == ".git" {
+                return false;
+            }
+            if is_nested_repo(e) {
+                if let Some(path) = e.path().strip_prefix(&root_owned).ok().and_then(|p| p.to_str()) {
+                    found_in.lock().unwrap().push(path.to_string());
+                }
+                return false;
+            }
+            true
+        })
+        .build()
+        .for_each(drop);
+    let mut out = std::mem::take(&mut *found.lock().unwrap());
+    out.sort();
+    out
 }
 
 /// Paths of every file copse tracks (everything not ignored, plus whatever `index`
@@ -480,6 +507,9 @@ pub fn tracked_paths(root: &Path, index: &Index) -> Vec<String> {
 /// tracked anyway), sorted.
 pub fn ignored_paths(root: &Path, index: &Index) -> Vec<String> {
     let tracked: std::collections::HashSet<String> = tracked_paths(root, index).into_iter().collect();
+    // On a disk that ignores case, `keep.log` on disk is the tracked `Keep.log`.
+    let folded: std::collections::HashSet<String> =
+        if crate::cmd::ignores_case(root) { index.entries.keys().map(|p| crate::cmd::fold_path(p)).collect() } else { Default::default() };
     let mut out = Vec::new();
     let walker = WalkBuilder::new(root)
         .standard_filters(false)
@@ -492,7 +522,7 @@ pub fn ignored_paths(root: &Path, index: &Index) -> Vec<String> {
             continue;
         }
         if let Some(rel) = entry.path().strip_prefix(root).ok().and_then(|r| r.to_str()) {
-            if !tracked.contains(rel) {
+            if !tracked.contains(rel) && !folded.contains(&crate::cmd::fold_path(rel)) {
                 out.push(rel.to_string());
             }
         }

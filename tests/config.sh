@@ -125,6 +125,16 @@ echo b2 > a && cps commit -m edit >/dev/null && same "$(cps ls-files | tr '\n' '
 echo k2 > keep.log && same "$(cps status | grep -E '^  [AMD] ' | sed 's/^ *//' | tr '\n' ',')" "M keep.log," "edits to them are seen" && cps commit -m k2 >/dev/null && same "$(cps show HEAD:keep.log)" "k2" "and committed" || fail "line $LINENO: a step before this check failed"
 echo other > other.log && out=$(cps clean -x) && [[ "$out" == *"other.log"* && "$out" != *"keep.log"* && "$out" != *"build/keep.txt"* ]] && ok "clean -x removes only untracked ignored files, never tracked ones" || fail "line $LINENO: $out"
 rm other.log && cps grep k2 | has "keep.log" && ok "grep searches them" || fail "line $LINENO: a step before this check failed"
+mkdir -p ../probe && touch ../probe/x
+if [[ -e ../probe/X ]]; then
+  # Where the disk ignores case, keep.log renamed to KEEP.log is still the tracked file.
+  mv keep.log tmp.log && mv tmp.log KEEP.log && echo more >> KEEP.log
+  out=$(cps clean -x) && [[ "$out" != *KEEP.log* ]] && ok "clean -x never takes a tracked file renamed only in case for an ignored one" || fail "line $LINENO: $out"
+  mv KEEP.log tmp.log && mv tmp.log keep.log && cps restore keep.log >/dev/null
+else
+  ok "(this disk tells case apart, so a renamed-in-case file is a new one)"
+fi
+rm -rf ../probe
 mkdir "$WORK/elsewhere" && echo b > "$WORK/elsewhere/keep.txt" && rm -rf build && ln -s "$WORK/elsewhere" build
 cps status | has "D build/keep.txt" && ok "a tracked file is never read through a symlinked folder" || fail "line $LINENO: $(cps status)"
 rm build && mkdir build && echo b > build/keep.txt && echo late > late.txt && cps commit -m late >/dev/null && echo 'late.txt' >> .copse/exclude

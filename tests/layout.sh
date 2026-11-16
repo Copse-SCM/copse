@@ -136,6 +136,16 @@ cps gc --prune now >/dev/null && cps fsck | has "everything is intact" && ok "gc
 cd ../feature && mkdir experiment && (cd experiment && cps init >/dev/null && echo work > notes) && cd ../src
 expect_fail "removing a worktree with another repository inside is refused" "repository(s) inside it" cps worktree remove ../feature
 [[ -f ../feature/experiment/notes ]] && ok "and that repository is kept" || fail "line $LINENO: the nested repository was deleted"
+rm -rf ../feature/experiment && mkdir -p "$HOME/.config/copse" && echo 'vendor/' >> "$HOME/.config/copse/ignore" && mkdir -p ../feature/vendor/lib && (cd ../feature/vendor/lib && cps init >/dev/null && echo work > notes)
+expect_fail "so is one inside an ignored folder" "repository(s) inside it" cps worktree remove ../feature
+rm -rf ../feature/vendor && sed -i.bak '/^vendor\/$/d' "$HOME/.config/copse/ignore" && rm -f "$HOME/.config/copse/ignore.bak"
+fwt=$(dirname "$(grep -l "$WORK/feature" .copse/worktrees/*/path)")
+touch "$fwt/REBASE_STATE" && expect_fail "and removing one in the middle of a rebase" "in the middle of a rebase" cps worktree remove ../feature
+rm "$fwt/REBASE_STATE"
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); open(sys.argv[2], "w").close(); time.sleep(30)' "$fwt/operation.lock" ../holding & holder=$!
+for _ in $(seq 1 100); do [[ -e ../holding ]] && break; perl -e 'select(undef,undef,undef,0.05)'; done
+expect_fail "or while a copse command is running there (even with --force)" "is running in that worktree" cps worktree remove --force ../feature
+kill $holder; wait $holder 2>/dev/null || true; rm -f ../holding
 cd ../feature && echo unsaved > unsaved.txt && cd ../src
 expect_fail "removing a worktree with uncommitted changes is refused" "uncommitted change" cps worktree remove ../feature
 cps worktree remove --force ../feature >/dev/null && [[ ! -e ../feature ]] && ok "unless --force" || fail "line $LINENO: a step before this check failed"

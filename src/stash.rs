@@ -270,6 +270,9 @@ pub fn apply(n: usize, keep: bool) -> Result<()> {
         };
     }
     apply_tree(&repo, &mut index, &files, &target, &[])?;
+    // Stashed changes to files outside a sparse checkout are written out anyway (as
+    // conflicts are): leaving them off disk would lose them once the stash goes.
+    crate::sparse::write_conflicts(&repo, &target, touched.iter().copied())?;
     // The stashed work (and your other changes) show as uncommitted changes, as before.
     stage_as_changes(&mut index, &target, &ours);
     index.save(&repo.wt)?;

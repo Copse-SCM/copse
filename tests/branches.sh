@@ -49,6 +49,7 @@ cps branch old HEAD~1 >/dev/null && cps checkout old >/dev/null && [[ ! -e u.txt
 echo "== renaming"
 cps branch -m old older | has "Renamed branch old to older" && same "$(branches)" "main,older" "rename another branch" || fail "line $LINENO: a step before this check failed"
 cps branch -m trunk >/dev/null && same "$(cps status | head -1)" "On branch trunk" "rename the current branch: you stay on it" || fail "line $LINENO: a step before this check failed"
+tip=$(cps rev-parse trunk) && cps branch -M trunk Trunk >/dev/null && same "$(cps status | head -1) $(cps rev-parse Trunk)" "On branch Trunk $tip" "a rename that only changes case keeps the branch (and its commits), even where the disk ignores case" && cps branch -m Trunk trunk >/dev/null || fail "line $LINENO: a step before this check failed"
 same "$(branches)" "older,trunk" "old name gone"
 expect_fail "rename onto an existing name is refused" "already exists" cps branch -m older trunk
 tip=$(cps rev-parse trunk)
