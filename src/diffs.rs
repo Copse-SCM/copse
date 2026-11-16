@@ -17,6 +17,18 @@ use anyhow::{bail, Result};
 use similar::{ChangeTag, TextDiff};
 use std::collections::{BTreeSet, HashMap};
 
+thread_local! {
+    /// Put before every line of diff output: the graph's padding, when `log --graph`
+    /// shows a commit's changes (as git draws the graph down beside them).
+    static PREFIX: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// A line of diff output, after the current prefix.
+macro_rules! out {
+    () => { PREFIX.with(|p| println!("{}", p.borrow())) };
+    ($($arg:tt)*) => { PREFIX.with(|p| println!("{}{}", p.borrow(), format!($($arg)*))) };
+}
+
 /// One side of a comparison: a commit's files, or the working directory.
 struct Side {
     files: Files,
@@ -117,9 +129,16 @@ fn print_diff(repo: &Repo, old: &Side, new: &Side, specs: &[String], stat: bool)
     Ok(changes.len())
 }
 
-/// (insertions, deletions), or None for a binary file.
+/// (insertions, deletions), or None for a binary file: as in git, one with a
+/// zero byte in its first 8000 (text in another encoding than UTF-8 is counted
+/// line by line too).
 fn line_counts(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
-    let (a, b) = (as_text(a)?, as_text(b)?);
+    let binary = |d: &[u8]| d[..d.len().min(8000)].contains(&0);
+    if binary(a) || binary(b) {
+        return None;
+    }
+    let (a, b) = (String::from_utf8_lossy(a), String::from_utf8_lossy(b));
+    let (a, b) = (a.as_ref(), b.as_ref());
     let diff = TextDiff::from_lines(a, b);
     let (mut ins, mut del) = (0, 0);
     for change in diff.iter_all_changes() {
@@ -133,18 +152,18 @@ fn line_counts(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
 }
 
 fn print_file(ch: &FileChange, a: &[u8], b: &[u8]) {
-    println!("{}", paint("1", &format!("diff {}", crate::objects::quote_path(&ch.path))));
+    out!("{}", paint("1", &format!("diff {}", crate::objects::quote_path(&ch.path))));
     match (ch.old, ch.new) {
-        (None, Some((m, _))) => println!("new file, mode {}", git_mode(m)),
-        (Some((m, _)), None) => println!("deleted file, mode {}", git_mode(m)),
-        (Some((om, _)), Some((nm, _))) if om != nm => println!("mode changed from {} to {}", git_mode(om), git_mode(nm)),
+        (None, Some((m, _))) => out!("new file, mode {}", git_mode(m)),
+        (Some((m, _)), None) => out!("deleted file, mode {}", git_mode(m)),
+        (Some((om, _)), Some((nm, _))) if om != nm => out!("mode changed from {} to {}", git_mode(om), git_mode(nm)),
         _ => {}
     }
     if a == b {
         return; // only the mode changed
     }
     let (Some(a_text), Some(b_text)) = (as_text(a), as_text(b)) else {
-        println!("Binary file differs");
+        out!("Binary file differs");
         return;
     };
     let a_name = if ch.old.is_some() { crate::objects::quote_path(&format!("a/{}", ch.path)).into_owned() } else { "/dev/null".into() };
@@ -162,7 +181,7 @@ fn print_file(ch: &FileChange, a: &[u8], b: &[u8]) {
         } else {
             line.to_string()
         };
-        println!("{colored}");
+        out!("{colored}");
     }
 }
 
@@ -196,7 +215,8 @@ fn print_stat(stats: &[(String, Result<(usize, usize), (usize, usize)>)]) {
     }
     let stats: Vec<(String, Result<(usize, usize), (usize, usize)>)> = stats.iter().map(|(p, c)| (crate::objects::quote_path(p).into_owned(), *c)).collect();
     let digits = |n: usize| n.to_string().len();
-    let max_len = stats.iter().map(|(p, _)| p.chars().count()).max().unwrap_or(0);
+    let width_of = crate::pretty::display_width;
+    let max_len = stats.iter().map(|(p, _)| width_of(p)).max().unwrap_or(0);
     let most = stats.iter().filter_map(|(_, c)| c.ok().map(|(i, d)| i + d)).max().unwrap_or(0);
     let bin_width = stats.iter().filter_map(|(_, c)| c.err().map(|(old, new)| 14 + digits(old) + digits(new))).max().unwrap_or(0);
     let mut number_width = if bin_width > 0 { 3 } else { 0 };
@@ -219,22 +239,20 @@ fn print_stat(stats: &[(String, Result<(usize, usize), (usize, usize)>)]) {
     let (mut total_ins, mut total_del) = (0, 0);
     for (path, counts) in &stats {
         // A name too long for its column keeps its end, from a `/` where it can.
-        let (prefix, name) = if path.chars().count() > name_width {
-            let keep = name_width.saturating_sub(3);
-            let chars: Vec<char> = path.chars().collect();
-            let tail: String = chars[chars.len() - keep.min(chars.len())..].iter().collect();
+        let (prefix, name) = if width_of(path) > name_width {
+            let tail = crate::pretty::fit(path, name_width.saturating_sub(3), true);
             ("...", tail.find('/').map_or(tail.clone(), |i| tail[i..].to_string()))
         } else {
             ("", path.clone())
         };
-        let pad = name_width.saturating_sub(prefix.len() + name.chars().count());
+        let pad = name_width.saturating_sub(prefix.len() + width_of(&name));
         let shown = format!("{prefix}{name}{}", " ".repeat(pad));
         match counts {
             Err((old, new)) => {
                 if old == new && *old == 0 {
-                    println!(" {shown} | {:>number_width$}", "Bin");
+                    out!(" {shown} | {:>number_width$}", "Bin");
                 } else {
-                    println!(" {shown} | {:>number_width$} {} -> {} bytes", "Bin", paint("31", &old.to_string()), paint("32", &new.to_string()));
+                    out!(" {shown} | {:>number_width$} {} -> {} bytes", "Bin", paint("31", &old.to_string()), paint("32", &new.to_string()));
                 }
             }
             Ok((ins, del)) => {
@@ -255,7 +273,7 @@ fn print_stat(stats: &[(String, Result<(usize, usize), (usize, usize)>)]) {
                     }
                 }
                 let space = if ins + del > 0 { " " } else { "" };
-                println!(" {shown} | {:>number_width$}{space}{}{}", ins + del, paint("32", &"+".repeat(i)), paint("31", &"-".repeat(d)));
+                out!(" {shown} | {:>number_width$}{space}{}{}", ins + del, paint("32", &"+".repeat(i)), paint("31", &"-".repeat(d)));
             }
         }
     }
@@ -269,7 +287,7 @@ fn print_stat(stats: &[(String, Result<(usize, usize), (usize, usize)>)]) {
     if total_del > 0 || both_zero {
         summary += &format!(", {}", plural(total_del, "deletion(-)", "deletions(-)"));
     }
-    println!("{summary}");
+    out!("{summary}");
 }
 
 // ---------------------------------------------------------------- commands
@@ -303,7 +321,15 @@ pub fn diff(revs: &[String], paths: &[String], stat: bool) -> Result<()> {
 }
 
 /// What one commit changed (compared with its first parent), for `log -p` / `--stat`.
-pub fn commit_changes(repo: &Repo, id: &Id, specs: &[String], stat: bool) -> Result<()> {
+/// A commit's changes (against its first parent), each line after `prefix`.
+pub fn commit_changes(repo: &Repo, id: &Id, specs: &[String], stat: bool, prefix: &str) -> Result<()> {
+    PREFIX.with(|p| *p.borrow_mut() = prefix.to_string());
+    let result = commit_changes_inner(repo, id, specs, stat);
+    PREFIX.with(|p| p.borrow_mut().clear());
+    result
+}
+
+fn commit_changes_inner(repo: &Repo, id: &Id, specs: &[String], stat: bool) -> Result<()> {
     let c = repo.read_commit(id)?;
     let parent = match c.parents.first() {
         Some(p) => Side::commit(repo, p)?,
@@ -339,16 +365,16 @@ pub fn show(rev: Option<&str>, stat: bool) -> Result<()> {
         let (kind, data) = repo.store.get(&tag_id)?;
         if kind == Kind::Tag {
             let tag = Tag::decode(&data)?;
-            println!("{}", paint("33", &format!("tag {}", tag.name)));
+            out!("{}", paint("33", &format!("tag {}", tag.name)));
             if let Some(t) = &tag.tagger {
-                println!("Tagger: {}", t.who);
-                println!("Date:   {}", local_date(t.time, &t.tz));
+                out!("Tagger: {}", t.who);
+                out!("Date:   {}", local_date(t.time, &t.tz));
             }
-            println!();
+            out!();
             for line in tag.message.lines() {
-                println!("    {line}");
+                out!("    {line}");
             }
-            println!();
+            out!();
         }
     }
 
@@ -364,27 +390,27 @@ pub fn show(rev: Option<&str>, stat: bool) -> Result<()> {
         }
     }
     let deco = labels.get(&id).map(|n| paint("32", &format!(" ({})", n.join(", ")))).unwrap_or_default();
-    println!("{}{deco}", paint("33", &format!("commit {}", id.to_hex())));
+    out!("{}{deco}", paint("33", &format!("commit {}", id.to_hex())));
     if c.parents.len() > 1 {
-        println!("Merge:  {}", c.parents.iter().map(short).collect::<Vec<_>>().join(" "));
+        out!("Merge:  {}", c.parents.iter().map(short).collect::<Vec<_>>().join(" "));
     }
-    println!("Author: {}", c.author.who);
-    println!("Date:   {}", local_date(c.author.time, &c.author.tz));
+    out!("Author: {}", c.author.who);
+    out!("Date:   {}", local_date(c.author.time, &c.author.tz));
     if c.committer.who != c.author.who {
-        println!("Commit: {}", c.committer.who);
+        out!("Commit: {}", c.committer.who);
     }
-    println!();
+    out!();
     for line in c.message.lines() {
-        println!("    {line}");
+        out!("    {line}");
     }
-    println!();
+    out!();
 
     let parent = match c.parents.first() {
         Some(p) => Side::commit(&repo, p)?,
         None => Side::empty(),
     };
     if c.parents.len() > 1 {
-        println!("{}", paint("2", &format!("(changes compared with the first parent, {})", short(&c.parents[0]))));
+        out!("{}", paint("2", &format!("(changes compared with the first parent, {})", short(&c.parents[0]))));
     }
     let new = Side { files: flatten(&repo.store, &c.tree)?, worktree: false };
     print_diff(&repo, &parent, &new, &[], stat)?;

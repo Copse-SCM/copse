@@ -173,6 +173,8 @@ pub fn log(args: LogArgs) -> Result<()> {
     };
 
     let mut shown = 0;
+    // Whether the last entry ended without a newline of its own (format:%s, say).
+    let mut missing_newline = false;
     for (id, c) in walk(&repo, &tips, args.first_parent, graph.is_some())? {
         if shown >= args.limit {
             break;
@@ -209,13 +211,16 @@ pub fn log(args: LogArgs) -> Result<()> {
         if let Some(g) = graph.as_mut() {
             g.update(id, &parents);
         }
-        let multi_line = match &args.format {
+        // Entries that don't end themselves (format:, and the named formats but
+        // oneline) are separated by a newline: after the graph's padding only if the
+        // last entry ended with a newline of its own (else it'd be a gap in it).
+        let separated = match &args.format {
             Some(f @ crate::pretty::Format::Named(_)) => !f.is_one_line(),
             Some(crate::pretty::Format::Custom { terminator, .. }) => !terminator,
-            None => !args.oneline,
+            None => false,
         };
-        if shown > 1 && multi_line && !matches!(&args.format, None) {
-            let pad = graph.as_mut().map(|g| g.padding_line()).unwrap_or_default();
+        if shown > 1 && separated {
+            let pad = if missing_newline { String::new() } else { graph.as_mut().map(|g| g.padding_line()).unwrap_or_default() };
             println!("{pad}");
         }
         let mut row = String::new();
@@ -231,32 +236,48 @@ pub fn log(args: LogArgs) -> Result<()> {
         }
         let labels_text = labels.get(&id).map(|n| paint("32", &format!(" ({})", n.join(", ")))).unwrap_or_default();
         let title = c.message.lines().next().unwrap_or_default();
-        if let Some(format) = &args.format {
-            let custom_separator = matches!(format, crate::pretty::Format::Custom { terminator: false, .. });
+        if let Some(format @ crate::pretty::Format::Named(_)) = &args.format {
             let text = crate::pretty::render(format, &id, &c, &deco, args.date);
-            // A named format ends with its own newline; a custom one is printed as
-            // it expanded (%B ends with the message's blank line, as in git).
-            let text = if matches!(format, crate::pretty::Format::Named(_)) { text.strip_suffix('\n').unwrap_or(&text) } else { &text };
+            let text = text.strip_suffix('\n').unwrap_or(&text);
             let mut lines = text.split('\n');
             let first = lines.next().unwrap_or_default();
             let mut out = format!("{row}{first}");
             for l in lines {
                 out += &format!("\n{}{l}", graph_prefix(&mut graph));
             }
-            if custom_separator {
-                print!("{out}");
-                if graph.as_ref().is_some_and(|g| !g.is_finished()) {
-                    // format: has no newline after an entry; the graph's rest goes
-                    // on lines of its own, the last one left open as the entry was.
-                    let mut rest = Vec::new();
-                    while let Some(g) = graph.as_mut().filter(|g| !g.is_finished()) {
-                        rest.push(g.next_line().0);
-                    }
-                    print!("\n{}", rest.join("\n"));
+            println!("{out}");
+            missing_newline = false;
+        } else if let Some(format @ crate::pretty::Format::Custom { terminator, .. }) = &args.format {
+            // As git prints a custom format beside the graph: each line after the
+            // first after the graph's next line (none after a final newline), then
+            // what's left of the graph, then tformat:'s newline (after the padding,
+            // when the text ended with a newline of its own).
+            crate::pretty::set_line_start(crate::pretty::display_width(&row));
+            let text = crate::pretty::render(format, &id, &c, &deco, args.date);
+            let ends_with_newline = text.ends_with('\n');
+            let mut out = row.clone();
+            let mut rest = text.as_str();
+            while let Some(i) = rest.find('\n') {
+                out.push_str(&rest[..=i]);
+                rest = &rest[i + 1..];
+                if !rest.is_empty() {
+                    out.push_str(&graph_prefix(&mut graph));
                 }
-            } else {
-                println!("{out}");
             }
+            out.push_str(rest);
+            print!("{out}");
+            if graph.as_ref().is_some_and(|g| !g.is_finished()) {
+                let mut left = Vec::new();
+                while let Some(g) = graph.as_mut().filter(|g| !g.is_finished()) {
+                    left.push(g.next_line().0);
+                }
+                print!("{}{}{}", if ends_with_newline { "" } else { "\n" }, left.join("\n"), if ends_with_newline { "\n" } else { "" });
+            }
+            if *terminator {
+                let pad = if ends_with_newline { graph.as_mut().map(|g| g.padding_line()).unwrap_or_default() } else { String::new() };
+                println!("{pad}");
+            }
+            missing_newline = !ends_with_newline;
         } else if args.oneline {
             println!("{row}{}{labels_text} {title}", paint("33", &short(&id)));
         } else {
@@ -267,12 +288,23 @@ pub fn log(args: LogArgs) -> Result<()> {
             println!("{}", graph_prefix(&mut graph).trim_end());
         }
         graph_rest(&mut graph);
-        if args.patch || args.stat {
-            if matches!(&args.format, Some(crate::pretty::Format::Custom { terminator: false, .. })) {
-                println!();
+        // A merge's changes aren't shown (git's default too). Otherwise, after an
+        // entry longer than one line, a separating line, and each line of the
+        // changes after the graph's padding, as git does.
+        if (args.patch || args.stat) && parents.len() <= 1 {
+            let one_line = match &args.format {
+                Some(f @ crate::pretty::Format::Named(_)) => f.is_one_line(),
+                Some(crate::pretty::Format::Custom { .. }) => false,
+                None => args.oneline,
+            };
+            let pad = graph.as_mut().map(|g| g.padding_line()).unwrap_or_default();
+            if !one_line && args.format.is_some() {
+                println!("{pad}");
             }
-            crate::diffs::commit_changes(&repo, &id, &specs, args.stat && !args.patch)?;
-            println!();
+            crate::diffs::commit_changes(&repo, &id, &specs, args.stat && !args.patch, &pad)?;
+            if args.format.is_none() && !args.oneline {
+                println!(); // copse's own format: a blank line before the next commit
+            }
         }
     }
     if shown > 0 && matches!(&args.format, Some(crate::pretty::Format::Custom { terminator: false, .. })) && !(args.patch || args.stat) {

@@ -82,6 +82,17 @@ for args in "HEAD" "-r --name-only HEAD" "HEAD deep" "HEAD deep/" "HEAD ../run.s
   [[ "$(cd src && cps ls-tree $args | ids)" == "$(cd ../g/src && git ls-tree $args | ids)" ]] || fail "ls-tree $args in a subfolder differs from git: $(cd src && cps ls-tree $args)"
 done
 ok "in a subfolder, paths are relative to it, and with none its own contents are listed"
+rm -rf ../order ../order-c && git init -q -b main ../order && (cd ../order && mkdir -p a sub/inner && echo 1 > a-b && echo 2 > a.txt && echo 3 > a0 && echo 4 > a/x && echo 5 > sub/f && echo 6 > sub/inner/g && git add -A && GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@e git commit -qm one)
+cps clone ../order ../order-c >/dev/null 2>&1
+for args in "HEAD" "-r HEAD" "HEAD ." "-d HEAD"; do
+  # shellcheck disable=SC2086
+  [[ "$(cd ../order-c && cps ls-tree $args | ids)" == "$(git -C ../order ls-tree $args | ids)" ]] || fail "ls-tree $args differs from git: $(cd ../order-c && cps ls-tree $args)"
+done
+for args in "HEAD ." "HEAD .." "HEAD inner/.."; do
+  # shellcheck disable=SC2086
+  [[ "$(cd ../order-c/sub && cps ls-tree $args | ids)" == "$(cd ../order/sub && git ls-tree $args | ids)" ]] || fail "ls-tree $args in sub differs from git: $(cd ../order-c/sub && cps ls-tree $args)"
+done
+ok "entries in git's order (a folder sorts as if it ended in /), and . and .. mean a folder's contents, as in git"
 
 echo "== ls-files, rev-parse, hash-object"
 alike "ls-files lists the tracked files" ls-files

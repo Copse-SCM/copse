@@ -215,7 +215,9 @@ pub fn ls_tree(rev: &str, path: Option<&str>, recursive: bool, dirs_only: bool, 
     };
     let here = here_in(&repo);
     let given = format!("{here}{}", path.unwrap_or(""));
-    let folder = given.is_empty() || given.ends_with('/');
+    // A folder's contents: no PATH, PATH/, or a PATH ending in . or ..
+    let last = given.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let folder = given.is_empty() || given.ends_with('/') || last == "." || last == "..";
     let spec = resolve_dots(&given).with_context(|| format!("{} is outside the repository", path.unwrap_or("")))?;
     let mut found = Vec::new();
     walk_tree(&repo.store, &tree, "", &spec, folder, recursive, dirs_only, &mut found)?;
@@ -237,7 +239,20 @@ pub fn ls_tree(rev: &str, path: Option<&str>, recursive: bool, dirs_only: bool, 
 /// slash; "" for the top), going into folders only as far as needed.
 #[allow(clippy::too_many_arguments)]
 fn walk_tree(store: &Store, tree: &Id, dir: &str, spec: &str, folder: bool, recursive: bool, dirs: bool, out: &mut Vec<(String, Mode, Id)>) -> Result<()> {
-    for e in crate::objects::decode_tree(&store.get_kind(tree, Kind::Tree)?)? {
+    // git's tree order: a folder sorts as if its name ended in "/" (so `a.txt`
+    // comes before the folder `a`, and `a` before `a0`).
+    let mut entries = crate::objects::decode_tree(&store.get_kind(tree, Kind::Tree)?)?;
+    entries.sort_by(|a, b| {
+        let key = |e: &crate::objects::TreeEntry| {
+            let mut k = e.name.as_bytes().to_vec();
+            if e.mode == Mode::Dir {
+                k.push(b'/');
+            }
+            k
+        };
+        key(a).cmp(&key(b))
+    });
+    for e in entries {
         let path = format!("{dir}{}", e.name);
         let inside = spec.is_empty() || path.starts_with(&format!("{spec}/"));
         let is_dir = e.mode == Mode::Dir;
@@ -264,8 +279,13 @@ fn walk_tree(store: &Store, tree: &Id, dir: &str, spec: &str, folder: bool, recu
 
 /// Where you are in the project, as a path prefix ("" at the top, "src/" in src).
 fn here_in(repo: &Repo) -> String {
+    if repo.is_bare() {
+        return String::new(); // no files: everything is listed from the top
+    }
     let (Ok(cwd), Ok(root)) = (std::env::current_dir().and_then(|d| d.canonicalize()), repo.root.canonicalize()) else { return String::new() };
     match cwd.strip_prefix(&root) {
+        // Inside copse's own folder, as git inside .git: from the top.
+        Ok(rel) if rel.components().next().is_some_and(|c| c.as_os_str() == crate::repo::DIR) => String::new(),
         Ok(rel) if !rel.as_os_str().is_empty() => format!("{}/", crate::objects::path_from_disk(rel)),
         _ => String::new(),
     }

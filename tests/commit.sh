@@ -165,6 +165,19 @@ for f in %s '%s%n%an'; do
   [[ "$(cd ../gr-c && cps log --graph --format="$f" main origin/x origin/y origin/z)" == "$(git -C ../gr log --graph --format="$f" main x y z)" ]] || fail "--graph --format=$f differs from git: $(diff <(cd ../gr-c && cps log --graph --format="$f" main origin/x origin/y origin/z) <(git -C ../gr log --graph --format="$f" main x y z))"
 done
 ok "merges, an octopus merge and a criss-cross draw exactly as in git (padding and trailing spaces too)"
+ids() { sed -E 's/[0-9a-f]{7,64}/ID/g'; }
+for g in "" --graph; do for extra in "" --stat; do for f in --format=%s --format=%B --format=%s%n --format=%s%n%b --format=format:%s --format=format:%B --pretty=medium --pretty=oneline; do
+  # shellcheck disable=SC2086
+  [[ "$(cd ../gr-c && cps log $g $extra "$f" main origin/x | ids)" == "$(git -C ../gr log $g $extra "$f" main x | ids)" ]] || fail "log $g $extra $f differs from git: $(diff <(cd ../gr-c && cps log $g $extra "$f" main origin/x | ids) <(git -C ../gr log $g $extra "$f" main x | ids) | head -6)"
+done; done; done
+ok "every format, with and without --graph and --stat, is laid out line for line as git lays it out"
+rm -rf ../wide ../wide-c && git init -q -b main ../wide && (cd ../wide && export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@e GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@e && echo a > a && git add a && git commit -qm '日本語のタイトル' && echo b >> a && git commit -qam 'plain subject that is long')
+cps clone ../wide ../wide-c >/dev/null 2>&1
+for f in '%<(12)%s|' '%<(8,trunc)%s|' '%<(8,ltrunc)%s|' '%<(9,mtrunc)%s|' '%><(21)%s|' '%<(15)%Cred%s%Creset|' '%<|(20)%s|'; do for g in "" --graph; do
+  # shellcheck disable=SC2086
+  [[ "$(cd ../wide-c && cps log $g --format="$f" main)" == "$(git -C ../wide log $g --format="$f" main)" ]] || fail "$f $g differs from git: $(cd ../wide-c && cps log $g --format="$f" main)"
+done; done
+ok "padding and truncating count wide characters as two columns, skip colour codes, and count the graph for %<|, as git does"
 git -C ../graph.git log --format=%s --topo-order -- f > /dev/null
 same "$(titles -- f | tr ',' '\n' | sort)" "$(git -C ../graph.git log --format=%s -- f | sort)" "-- PATH picks the same commits as git"
 

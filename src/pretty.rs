@@ -336,7 +336,7 @@ pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: Da
         let piece: Option<String> = match next {
             // %<(N), %>(N), %><(N), %<|(N), with ,trunc / ,ltrunc / ,mtrunc: the
             // next placeholder's width (git's column alignment).
-            '<' | '>' if modifier.is_none() => match parse_pad(&chars[at + 1..], out.rsplit('\n').next().map_or(0, |l| l.chars().count())) {
+            '<' | '>' if modifier.is_none() => match parse_pad(&chars[at + 1..], LINE_START.with(|c| c.get()) + display_width(out.rsplit('\n').next().unwrap_or(""))) {
                 Some((pad, len)) => {
                     pending_pad = Some(pad);
                     used = 1 + len;
@@ -393,7 +393,8 @@ pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: Da
             }
             _ => None,
         };
-        let is_pad = matches!(next, '<' | '>') && modifier.is_none();
+        // Padding waits for the next placeholder that prints text (not a colour).
+        let is_pad = matches!(next, '<' | '>' | 'C') && modifier.is_none();
         match piece {
             Some(p) => {
                 let p = match if is_pad { None } else { pending_pad.take() } {
@@ -423,6 +424,78 @@ pub fn expand(template: &str, id: &Id, c: &Commit, deco: &Decorations, dates: Da
     out
 }
 
+thread_local! {
+    /// How wide what's already on the line before the format is (the graph's
+    /// columns, with --graph): %<|(N) counts columns from the line's real start.
+    static LINE_START: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Say how many columns come before each line of the format (see LINE_START).
+pub fn set_line_start(columns: usize) {
+    LINE_START.with(|c| c.set(columns));
+}
+
+/// How many columns `text` takes on a terminal: wide characters (CJK, emoji)
+/// count two, combining marks none, and colour codes nothing, as git counts.
+pub fn display_width(text: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut width = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += c.width().unwrap_or(0);
+    }
+    width
+}
+
+/// The longest start (or, with `from_end`, end) of `text` that fits in `columns`.
+pub fn fit(text: &str, columns: usize, from_end: bool) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let mut used = 0;
+    let mut kept: Vec<char> = Vec::new();
+    let chars: Vec<char> = if from_end { text.chars().rev().collect() } else { text.chars().collect() };
+    for c in chars {
+        let w = c.width().unwrap_or(0);
+        if used + w > columns {
+            break;
+        }
+        used += w;
+        kept.push(c);
+    }
+    if from_end {
+        kept.reverse();
+    }
+    kept.into_iter().collect()
+}
+
+/// git's `strbuf_utf8_replace`: the characters whose first column is in
+/// [pos, pos + width) give way to `subst` (once); everything else stays.
+fn replace_columns(text: &str, pos: usize, width: usize, subst: &str) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let mut out = String::new();
+    let mut column = 0;
+    let mut subst = Some(subst);
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if w > 0 && column >= pos && column < pos + width {
+            if let Some(s) = subst.take() {
+                out.push_str(s);
+            }
+        } else {
+            out.push(c);
+        }
+        column += w;
+    }
+    out
+}
+
 /// A width for the next placeholder, from %<(N), %>(N), %><(N) or %<|(N).
 struct Pad {
     width: usize,
@@ -432,17 +505,15 @@ struct Pad {
 
 impl Pad {
     fn apply(&self, text: &str) -> String {
-        let chars: Vec<char> = text.chars().collect();
-        let n = chars.len();
+        let n = display_width(text);
         if n > self.width {
-            let keep = self.width.saturating_sub(2);
+            // git's truncation: characters whose first column falls in a range are
+            // replaced by "..", the range placed to keep the end, start or middle.
+            let w = self.width;
             return match self.trunc {
-                Some("trunc") => format!("{}..", chars[..keep].iter().collect::<String>()),
-                Some("ltrunc") => format!("..{}", chars[n - keep..].iter().collect::<String>()),
-                Some("mtrunc") => {
-                    let head = keep / 2;
-                    format!("{}..{}", chars[..head].iter().collect::<String>(), chars[n - (keep - head)..].iter().collect::<String>())
-                }
+                Some("trunc") => replace_columns(text, w.saturating_sub(2), n + 2 - w, ".."),
+                Some("ltrunc") => replace_columns(text, 0, n - w.saturating_sub(2), ".."),
+                Some("mtrunc") => replace_columns(text, (w / 2).saturating_sub(1), n + 2 - w, ".."),
                 _ => text.to_string(),
             };
         }

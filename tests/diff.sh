@@ -83,6 +83,8 @@ for cols in 80 40 120; do
   [[ "$(COLUMNS=$cols cps diff --stat HEAD~1 HEAD)" == "$(COLUMNS=$cols git -C ../server.git diff --stat HEAD~1 HEAD)" ]] || fail "--stat at $cols columns differs from git: $(diff <(COLUMNS=$cols cps diff --stat HEAD~1 HEAD) <(COLUMNS=$cols git -C ../server.git diff --stat HEAD~1 HEAD))"
 done
 ok "--stat is laid out exactly as git's: widths, scaled bars, shortened names, and Bin 3 -> 8 bytes"
+printf 'caf\351\n' > latin.txt && cps commit -m l1 >/dev/null && printf 'caf\351 au lait\nencore\n' > latin.txt && cps commit -m l2 >/dev/null && cps push gh >/dev/null
+same "$(cps diff --stat HEAD~1 HEAD)" "$(git -C ../server.git diff --stat HEAD~1 HEAD)" "a text file that isn't UTF-8 is counted line by line, not taken for binary (as git does)"
 
 echo
 echo "All $pass checks passed."
