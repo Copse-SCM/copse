@@ -108,7 +108,10 @@ impl GitMap {
 
     pub fn insert(&mut self, copse: Id, git: GitId) {
         if self.to_git.insert(copse, git).is_none() {
-            self.from_git.entry(git).or_insert(copse);
+            // The newest record for a git id wins, now as on reload: an object
+            // imported again (gc removed the first copy, or a shallow clone's commit
+            // now has its real parent) is found under its new copse id at once.
+            self.from_git.insert(git, copse);
             self.pending.push((copse, git));
         }
     }
@@ -133,6 +136,15 @@ impl GitMap {
         // The objects these name go to disk first, so the map never outlives them.
         crate::durable::flush_pending()?;
         let mut f = fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        // One process at a time (two worktrees fetching at once, say): trimming a
+        // record that's really another's append still being written would lose it.
+        // The OS lock goes with the file when it's closed.
+        {
+            use std::os::unix::io::AsRawFd;
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| format!("locking {}", self.path.display()));
+            }
+        }
         // A record cut short (a crash or a full disk mid-append) is dropped before
         // appending; otherwise every record after it would be read misaligned.
         let len = f.metadata()?.len();
@@ -859,6 +871,59 @@ pub fn delete_remote(repo: &Repo, remote: &str, url: &str, name: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saves_at_the_same_time_keep_every_record() {
+        let dir = std::env::temp_dir().join(format!("copse-gitmap-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let repo = Repo::init_bare(&dir).unwrap();
+        // A record cut short by an earlier crash, to be trimmed by the first save.
+        fs::write(repo.dir.join("gitmap"), [7u8; 10]).unwrap();
+        let threads: Vec<_> = (0u8..8)
+            .map(|t| {
+                let repo = Repo::open_path(&dir).unwrap();
+                std::thread::spawn(move || {
+                    for batch in 0u8..25 {
+                        let mut map = GitMap::load(&repo).unwrap();
+                        for i in 0u8..8 {
+                            let mut copse = [0u8; 32];
+                            copse[..3].copy_from_slice(&[t, batch, i]);
+                            let mut git = [0u8; 20];
+                            git[..3].copy_from_slice(&[t, batch, i]);
+                            map.insert(Id::from_bytes(copse), git);
+                        }
+                        map.save().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let len = fs::metadata(repo.dir.join("gitmap")).unwrap().len();
+        let map = GitMap::load(&repo).unwrap();
+        assert_eq!(len % 52, 0, "a record was cut short");
+        assert_eq!(map.to_git.len(), 8 * 25 * 8, "records were lost");
+        for (copse, git) in &map.to_git {
+            assert_eq!(&copse.as_bytes()[..3], &git[..3], "a record was read misaligned");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_newest_record_for_a_git_id_wins_at_once() {
+        let dir = std::env::temp_dir().join(format!("copse-gitmap-newest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let repo = Repo::init_bare(&dir).unwrap();
+        let mut map = GitMap::load(&repo).unwrap();
+        let (old, new, git) = (Id::from_bytes([1; 32]), Id::from_bytes([2; 32]), [9u8; 20]);
+        map.insert(old, git);
+        map.insert(new, git);
+        assert_eq!(map.copse(&git), Some(new));
+        map.save().unwrap();
+        assert_eq!(GitMap::load(&repo).unwrap().copse(&git), Some(new), "and the same after reloading");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn rejects_ids_that_arent_hex_without_panicking() {

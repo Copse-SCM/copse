@@ -403,6 +403,11 @@ cps fsck | has "record cut short" && ok "fsck notices a record cut short at the 
 (cd ../idmw && git checkout -q main && echo b > b && git add . && git commit -qm b && git push -q origin main && echo c > c && git add . && git commit -qm c && git push -q origin main)
 cps pull >/dev/null 2>&1 && (cd ../idmw && echo d > d && git add . && git commit -qm d && git push -q origin main) && cps pull >/dev/null 2>&1 && [[ $(cat d) == d ]] && ok "and fetches keep working: the cut record is dropped, not built on" || fail "line $LINENO: a step before this check failed"
 [[ $(( $(wc -c < .copse/gitmap) % 52 )) == 0 ]] && cps fsck | has "everything is intact" && ok "leaving the map whole" || fail "line $LINENO: $(cps fsck)"
+cd "$WORK" && rm -rf shm.git shmw shmc && git init -q --bare -b main shm.git && git clone -q shm.git shmw 2>/dev/null
+(cd shmw && for i in 1 2 3; do echo $i >> f; git add f; git commit -qm c$i; done; git push -q origin main && git checkout -qb feature HEAD~1 && echo x > x && git add x && git commit -qm feat && git push -q origin feature)
+cps clone --depth 1 "$WORK/shm.git" shmc >/dev/null 2>&1 && cd shmc && cps push origin --delete feature >/dev/null 2>&1 && cps gc --prune now >/dev/null && cps fetch --depth 2 >/dev/null 2>&1
+(cd ../shmw && git push -q origin feature) && cps fetch >/dev/null 2>&1
+same "$(cps log --format=%s origin/feature 2>&1 | head -1) $(cps fsck | grep -c 'everything is intact')" "feat 1" "a shallow clone's branch deleted, gc'd and fetched again (now with its real parent) is whole at once"
 cd "$WORK"
 
 echo
